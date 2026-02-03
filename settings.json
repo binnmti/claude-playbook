@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p specs)",
+      "Bash(gh --version)",
+      "Bash(gh auth status)",
+      "Bash(git init)",
+      "Bash(git add .)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nInitial commit: AICodeForge specification\n\nThis commit establishes the foundation of AICodeForge, a tool for crafting\nquality code through AI collaboration and review.\n\nIncludes:\n- Complete specification (specs/AICodeForge.md)\n- Project philosophy and roadmap\n- Phase 1: Specification management system\n- Phase 2+: AI collaborative review (future)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(gh repo create AICodeForge --public --source=. --description \"AI-powered code forge: Craft quality code through AI collaboration and review\" --push)",
+      "Bash(code:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "defaultMode": "dontAsk"
+  },
+  "alwaysThinkingEnabled": true
+}

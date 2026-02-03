@@ -1,0 +1,34 @@
+# Credentials and secrets
+.credentials.json
+
+# Local settings (may contain user-specific configs)
+settings.local.json
+
+# Cache and temporary data
+cache/
+debug/
+file-history/
+shell-snapshots/
+stats-cache.json
+
+# History and logs (private data)
+history.jsonl
+
+# IDE integration
+ide/
+
+# Plans (project-specific, temporary)
+plans/
+
+# Plugins (can be reinstalled)
+plugins/
+
+# Project-specific settings
+projects/
+
+# Statistics and telemetry
+statsig/
+telemetry/
+
+# Todos (session-specific)
+todos/
