@@ -14,5 +14,5 @@
     "ask": [],
     "defaultMode": "dontAsk"
   },
-  "alwaysThinkingEnabled": true
+  "alwaysThinkingEnabled": false
 }
