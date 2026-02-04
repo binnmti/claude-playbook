@@ -21,10 +21,13 @@
 ```
 doc/todos/
 ├── todo.md           # メイン（両方が編集）
-└── tasks/
+├── done.md           # 完了報告（Claude、ユーザーが確認用に読む）
+├── tasks/            # 未完了タスク
+│   └── task-xx/
+│       ├── plan.md   # Claude用詳細（ユーザーはほぼ見ない）
+└── done/             # 完了タスク（/todo-run完了時に移動）
     └── task-xx/
-        ├── plan.md   # Claude用詳細（ユーザーはほぼ見ない）
-        └── done.md   # 完了報告（Claude、ユーザーが確認用に読む）
+        ├── plan.md
 ```
 
 ## 参照フロー（ユーザー視点）
