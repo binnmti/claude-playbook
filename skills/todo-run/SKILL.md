@@ -245,7 +245,7 @@ mv doc/todos/tasks/task-xx doc/todos/done/
 
 ### Step 8: 総括レビューとドキュメントコミット（全タスク完了後）
 
-**1. 総括レビュー（サブエージェント + Copilot）:**
+**1. 総括レビュー（サブエージェント + Codex）:**
 
 2つのレビューを**並行実行**する:
 
@@ -272,21 +272,24 @@ mv doc/todos/tasks/task-xx doc/todos/done/
 指摘があれば修正。
 ```
 
-**B. GitHub Copilot レビュー:**
+**B. Codex レビュー:**
 
-変更をステージングしてから Copilot にレビューさせる:
+変更ファイル一覧を渡し、ファイル全体を読ませてレビューさせる:
 
 ```bash
-git add <変更ファイル>
-git diff --staged --unified=3 | copilot --model gpt-5.4 -p "
-この差分をコードレビューして。
+CHANGED_FILES=$(git diff --name-only HEAD~1)
+powershell.exe -Command "codex exec -m gpt-5.4 '
+以下のファイルが今回の変更対象です。各ファイルの全体を読んだ上でコードレビューしてください。
 目的は称賛ではなく欠陥発見。
 バグ、挙動回帰、仕様不一致、エッジケース、テスト不足だけを指摘して。
 必ず周辺コードとの整合も見る前提で判断して。
 出力は findings first。
 各指摘に 重大度 / 理由 / 該当ファイル / 該当箇所 を含める。
 問題なしなら、そう言った上で残留リスクを書く。
-"
+
+変更ファイル:
+$CHANGED_FILES
+'"
 ```
 
 **C. レビュー結果の統合:**

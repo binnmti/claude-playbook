@@ -26,9 +26,18 @@ plugins/
 # Project-specific settings
 projects/
 
+# Sessions
+sessions/
+
+# MCP auth cache
+mcp-needs-auth-cache.json
+
 # Statistics and telemetry
 statsig/
 telemetry/
 
 # Todos (session-specific)
 todos/
+
+# Backups
+backups/

@@ -14,5 +14,7 @@
     "ask": [],
     "defaultMode": "dontAsk"
   },
-  "alwaysThinkingEnabled": false
+  "language": "Japanese",
+  "alwaysThinkingEnabled": false,
+  "voiceEnabled": true
 }
