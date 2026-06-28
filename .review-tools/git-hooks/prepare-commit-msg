@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+loc="$ROOT/.git/hooks/prepare-commit-msg"
+[ -x "$loc" ] && exec "$loc" "$@"
+exit 0
