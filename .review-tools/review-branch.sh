@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Pre-PR review. Reviews the whole branch (merge-base..HEAD) with full file
-# contents and a broad lens (architecture, breaking changes, test coverage).
+# Pre-PR review. Reviews the whole branch (merge-base..HEAD) with a broad lens
+# (architecture, breaking changes, test coverage). The reviewers inspect git
+# themselves (read-only) rather than receiving an embedded diff, so the prompt
+# stays small -- embedding the full branch as one argv string overran the
+# kernel's 128KB per-argument limit and silently produced no review.
 # Blocks once per branch HEAD; a retry at the same HEAD passes.
 set -uo pipefail
 
@@ -24,25 +27,19 @@ HEADSHA=$(git rev-parse HEAD)
 PASS="$(git rev-parse --git-path .pr-review-passed)"
 [ "$(cat "$PASS" 2>/dev/null)" = "$HEADSHA" ] && exit 0
 
-CTX=$(mktemp); MAXFILES=25; MAXLINES=1200; n=0
-{
-  echo "=== BRANCH DIFF ($BASE...HEAD) ==="; echo "$DIFF"
-  echo; echo "=== FULL CONTENTS OF CHANGED FILES ==="
-  while IFS= read -r f; do
-    [ -f "$f" ] || continue
-    n=$((n+1)); [ "$n" -gt "$MAXFILES" ] && { echo "(…more files omitted)"; break; }
-    echo; echo "----- $f -----"; head -n "$MAXLINES" "$f"
-  done <<< "$FILES"
-} > "$CTX"
-
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROMPT="$(cat "$SELF/prompt-branch.md")"$'\n\n'"$(cat "$CTX")"
+PROMPT="$(cat "$SELF/prompt-branch.md")
+このリポジトリ内で変更を自分で確認してください(read-only): \`git diff ${MB}...HEAD\` を実行し、
+必要な変更ファイルは全文を読んでください。差分は埋め込んでいません。
+
+変更ファイル:
+${FILES}"
 
 OUT=$(mktemp -d)
-{ command -v codex >/dev/null 2>&1 && codex exec --sandbox read-only --skip-git-repo-check \
-    -c model_reasoning_effort=medium "$PROMPT" < /dev/null 2>/dev/null > "$OUT/codex"
+{ command -v codex >/dev/null 2>&1 && printf '%s' "$PROMPT" | codex exec --sandbox read-only --skip-git-repo-check \
+    -c model_reasoning_effort=medium > "$OUT/codex" 2>"$OUT/codex.err"
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"; } &
-{ command -v copilot >/dev/null 2>&1 && copilot -p "$PROMPT" --model gemini-3.1-pro-preview --log-level none < /dev/null 2>/dev/null \
+{ command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | copilot --model gemini-3.1-pro-preview --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
     | sed '/^Changes /,$d' > "$OUT/copilot"; } &
 wait
 
@@ -56,11 +53,16 @@ wait
     [ -z "$body" ] && continue
     any=1; echo; echo "### $r"; echo "$body"
   done
-  [ "$any" = 0 ] && echo "(no reviewer output — check codex/copilot auth)"
+  if [ "$any" = 0 ]; then
+    echo "(no reviewer output)"
+    for r in codex copilot; do
+      [ -s "$OUT/$r.err" ] && { echo "--- $r stderr (tail) ---"; tail -n 3 "$OUT/$r.err"; }
+    done
+  fi
   echo "════════════════════════════════════════════════════════"
   echo "Curate, address what matters (new commits), then re-run the PR command."
 } >&2
 
 echo "$HEADSHA" > "$PASS"
-rm -rf "$CTX" "$OUT"
+rm -rf "$OUT"
 exit 2

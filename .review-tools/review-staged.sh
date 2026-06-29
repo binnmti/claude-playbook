@@ -36,15 +36,17 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPT="$(cat "$SELF/prompt-commit.md")"$'\n\n'"$(cat "$CTX")"
 
 OUT=$(mktemp -d)
+# Prompt goes via stdin, not argv: a large staged change embedded as one argv
+# string overruns the kernel's 128KB per-argument limit and silently fails.
 run_codex() {
   command -v codex >/dev/null 2>&1 || return
-  codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=low \
-    "$PROMPT" < /dev/null 2>/dev/null > "$OUT/codex"
+  printf '%s' "$PROMPT" | codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=low \
+    > "$OUT/codex" 2>"$OUT/codex.err"
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"
 }
 run_copilot() {
   command -v copilot >/dev/null 2>&1 || return
-  copilot -p "$PROMPT" --model gemini-3.1-pro-preview --log-level none < /dev/null 2>/dev/null \
+  printf '%s' "$PROMPT" | copilot --model gemini-3.1-pro-preview --log-level none 2>"$OUT/copilot.err" \
     | sed '/^Changes /,$d' > "$OUT/copilot"
 }
 run_codex & run_copilot & wait
@@ -59,7 +61,12 @@ for r in codex copilot; do
   any=1
   echo; echo "### $r"; echo "$body"
 done
-[ "$any" = 0 ] && echo "(no reviewer produced output — check codex/copilot auth)"
+if [ "$any" = 0 ]; then
+  echo "(no reviewer produced output)"
+  for r in codex copilot; do
+    [ -s "$OUT/$r.err" ] && { echo "--- $r stderr (tail) ---"; tail -n 3 "$OUT/$r.err"; }
+  done
+fi
 echo "────────────────────────────────────────────────────────"
 echo "Curate the above, fix what matters, then re-commit."
 echo "Skip review for this commit: git commit --no-verify"
