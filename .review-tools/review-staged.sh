@@ -46,16 +46,21 @@ run_codex() {
 }
 run_copilot() {
   command -v copilot >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | copilot --model gemini-3.1-pro-preview --log-level none 2>"$OUT/copilot.err" \
+  printf '%s' "$PROMPT" | copilot --model auto --log-level none 2>"$OUT/copilot.err" \
     | sed '/^Changes /,$d' > "$OUT/copilot"
 }
-run_codex & run_copilot & wait
+run_agy() {
+  command -v agy >/dev/null 2>&1 || return
+  printf '%s' "$PROMPT" | agy --print --sandbox 2>"$OUT/agy.err" \
+    | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
+}
+run_codex & run_copilot & run_agy & wait
 
 echo "────────────────────────────────────────────────────────"
-echo " PRE-COMMIT REVIEW  (codex + copilot)  — Claude curates"
+echo " PRE-COMMIT REVIEW  (codex + copilot + agy)  — Claude curates"
 echo "────────────────────────────────────────────────────────"
 any=0
-for r in codex copilot; do
+for r in codex copilot agy; do
   body=$(sed '/^[[:space:]]*$/d' "$OUT/$r" 2>/dev/null)
   [ -z "$body" ] && continue
   any=1
@@ -63,7 +68,7 @@ for r in codex copilot; do
 done
 if [ "$any" = 0 ]; then
   echo "(no reviewer produced output)"
-  for r in codex copilot; do
+  for r in codex copilot agy; do
     [ -s "$OUT/$r.err" ] && { echo "--- $r stderr (tail) ---"; tail -n 3 "$OUT/$r.err"; }
   done
 fi

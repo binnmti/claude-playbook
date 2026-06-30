@@ -11,10 +11,21 @@ GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$GIT_ROOT" || exit 0
 
 BASE=""
-for b in "$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)" \
-         origin/main origin/develop main develop; do
-  [ -n "$b" ] && git rev-parse --verify -q "$b" >/dev/null && { BASE="$b"; break; }
-done
+# Direct-push to a long-lived branch (e.g. monitoring repos that push straight
+# to develop): review only the commits this push adds, i.e. vs the SAME-named
+# remote branch -- not vs main, which would drag in the entire develop history.
+CUR=$(git symbolic-ref -q --short HEAD 2>/dev/null)
+case "$CUR" in
+  main|master|develop)
+    git rev-parse --verify -q "origin/$CUR" >/dev/null 2>&1 && BASE="origin/$CUR" ;;
+esac
+# Feature branch (PR workflow): review the whole branch vs its merge target.
+if [ -z "$BASE" ]; then
+  for b in "$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)" \
+           origin/main origin/develop main develop; do
+    [ -n "$b" ] && git rev-parse --verify -q "$b" >/dev/null && { BASE="$b"; break; }
+  done
+fi
 [ -z "$BASE" ] && exit 0
 MB=$(git merge-base HEAD "$BASE" 2>/dev/null) || exit 0
 [ "$MB" = "$(git rev-parse HEAD)" ] && exit 0   # nothing ahead of base
@@ -39,23 +50,25 @@ OUT=$(mktemp -d)
 { command -v codex >/dev/null 2>&1 && printf '%s' "$PROMPT" | codex exec --sandbox read-only --skip-git-repo-check \
     -c model_reasoning_effort=medium > "$OUT/codex" 2>"$OUT/codex.err"
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"; } &
-{ command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | copilot --model gemini-3.1-pro-preview --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
+{ command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | copilot --model auto --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
     | sed '/^Changes /,$d' > "$OUT/copilot"; } &
+{ command -v agy >/dev/null 2>&1 && printf '%s' "$PROMPT" | agy --print --sandbox 2>"$OUT/agy.err" \
+    | sed '/<message>/,/<\/message>/d' > "$OUT/agy"; } &
 wait
 
 {
   echo "════════════════════════════════════════════════════════"
-  echo " PRE-PR REVIEW  ($BASE...HEAD)  — codex + copilot — Claude curates"
+  echo " PRE-PR REVIEW  ($BASE...HEAD)  — codex + copilot + agy — Claude curates"
   echo "════════════════════════════════════════════════════════"
   any=0
-  for r in codex copilot; do
+  for r in codex copilot agy; do
     body=$(sed '/^[[:space:]]*$/d' "$OUT/$r" 2>/dev/null)
     [ -z "$body" ] && continue
     any=1; echo; echo "### $r"; echo "$body"
   done
   if [ "$any" = 0 ]; then
     echo "(no reviewer output)"
-    for r in codex copilot; do
+    for r in codex copilot agy; do
       [ -s "$OUT/$r.err" ] && { echo "--- $r stderr (tail) ---"; tail -n 3 "$OUT/$r.err"; }
     done
   fi
