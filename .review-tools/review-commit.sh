@@ -28,6 +28,7 @@ PASS="$(git rev-parse --git-path .review-passed)"
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF/append-log.sh"
+. "$SELF/models.conf"
 REPO=$(basename "$GIT_ROOT")
 BR=$(git symbolic-ref -q --short HEAD 2>/dev/null || git rev-parse --short HEAD)
 HISTFILES=$(session_history_files "$REPO" "$BR")
@@ -38,7 +39,9 @@ HISTFILES=$(session_history_files "$REPO" "$BR")
 # untracked) before pointing reviewers at them. Cleaned up at the end.
 HISTCOPY=""
 if [ -n "$HISTFILES" ]; then
-  HISTCOPY=".git/.review-history-context.$$.md"
+  # in a worktree .git is a file, not a dir -- fall back to the tree root
+  HISTDIR=.git; [ -d .git ] || HISTDIR=.
+  HISTCOPY="$HISTDIR/.review-history-context.$$.md"
   printf '%s\n' "$HISTFILES" | while IFS= read -r hf; do cat "$hf"; done > "$HISTCOPY"
 fi
 
@@ -69,27 +72,33 @@ OUT=$(mktemp -d)
 # Each reviewer gets a hard deadline so a commit review always finishes
 # inside the caller's patience; timed-out reviewers show up as ⚠ rows.
 RVTIMEOUT=120
+# In a worktree git exports GIT_DIR/GIT_INDEX_FILE (absolute) to hooks; codex
+# inherits them and its internal curated-sync then fetch+resets OUR worktree
+# HEAD to refs/codex/curated-sync (observed 2026-07-01/02). Strip them for
+# every reviewer subprocess.
+GITENV=(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_COMMON_DIR)
 run_codex() {
   command -v codex >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=low \
+  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
+    -m "$CODEX_MODEL_COMMIT" -c model_reasoning_effort="$CODEX_EFFORT_COMMIT" \
     > "$OUT/codex" 2>"$OUT/codex.err"
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"
 }
 run_copilot() {
   command -v copilot >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" copilot --model auto --log-level none 2>"$OUT/copilot.err" \
+  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_COMMIT" --log-level none 2>"$OUT/copilot.err" \
     | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"
 }
 run_agy() {
   command -v agy >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" agy --print --sandbox 2>"$OUT/agy.err" \
+  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --print --sandbox --model "$AGY_MODEL_COMMIT" 2>"$OUT/agy.err" \
     | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
 }
 run_codex & run_copilot & run_agy & wait
 
 append_review_log "commit" "$REPO" "$BR" "${HASH:0:10}" "$OUT"
 
-if [ "${APPEND_FINDINGS:-0}" = 0 ]; then
+if [ "${APPEND_FINDINGS:-0}" = 0 ] && [ "${APPEND_UNPARSED:-0}" = 0 ]; then
   echo "PRE-COMMIT REVIEW: 指摘なし — コミットを通します (codex + copilot + agy)"
   exit 0
 fi
@@ -106,6 +115,10 @@ echo "────────────────────────�
 echo "Curate the above, fix what matters, then re-commit (同一内容の再コミットは通ります)."
 echo "その後、この回の指摘への対応を1行で記録してください (push までに必須):"
 echo "  $SELF/respond.sh \"指摘Aは修正、Bは誤検知 (理由)\""
+if [ "${APPEND_FINDINGS:-0}" = 0 ]; then
+  echo "※ 今回はパース不能な形式外出力 (❓) のみ。内容に実質的な指摘が無ければ"
+  echo "  そのまま再コミットで通ります (Response は自動記入済み、respond.sh 不要)。"
+fi
 echo "Skip: git commit --no-verify  /  REVIEW_SKIP=1 git commit …"
 
 echo "$HASH" > "$PASS"

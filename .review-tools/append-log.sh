@@ -31,6 +31,13 @@ _global_lock() {
   printf '%s' "$SELF/log/.lock"
 }
 
+# Newest session file basename under log/ for repo+sanitized-branch, empty if
+# none. Prefix-anchored (a repo named "prototype" must not match
+# "monitoring-prototype" sessions -- grep -F substring matching did).
+_latest_session() {
+  ls -1 "$SELF/log" 2>/dev/null | awk -v p="${1}__${2}__" 'index($0,p)==1' | sort -r | head -1
+}
+
 # Finds the most recent non-closed session file for repo+branch, or decides
 # a fresh filename if none exists / the most recent one is already closed.
 # Must be called only while already holding the global lock.
@@ -39,7 +46,7 @@ _resolve_session_file() {
   local branch_san; branch_san=$(_sanitize "$branch")
   local LOGDIR="$SELF/log"
   local candidate
-  candidate=$(ls -1 "$LOGDIR" 2>/dev/null | grep -F "${repo}__${branch_san}__" | sort -r | head -1)
+  candidate=$(_latest_session "$repo" "$branch_san")
   if [ -n "$candidate" ] && ! grep -q '^<!-- SESSION CLOSED -->$' "$LOGDIR/$candidate" 2>/dev/null; then
     printf '%s\n' "$LOGDIR/$candidate"
   else
@@ -74,8 +81,9 @@ session_history_files() {
 # Read-only: how many rounds in the current open session for repo+branch
 # still have an unfilled Response. 0 if there's no open session, or it's
 # already closed, or every round is curated. Used to gate the "retry at the
-# same HEAD/diff passes silently" escape hatch in review-commit.sh /
-# review-push.sh -- so a retry can't slip past rounds nobody ever curated
+# same HEAD passes silently" escape hatch in review-push.sh (commit-side has
+# no pending gate by design: Responses are due by push, not per commit)
+# -- so a retry can't slip past rounds nobody ever curated
 # (that's how the same false positive kept resurfacing across pushes: the
 # escape hatch only checks whether the ref changed, never whether the
 # previous round's Response got filled in).
@@ -84,7 +92,7 @@ session_pending_count() {
   local branch_san; branch_san=$(_sanitize "$branch")
   local LOGDIR="$SELF/log"
   local candidate
-  candidate=$(ls -1 "$LOGDIR" 2>/dev/null | grep -F "${repo}__${branch_san}__" | sort -r | head -1)
+  candidate=$(_latest_session "$repo" "$branch_san")
   [ -n "$candidate" ] || { printf '0\n'; return 0; }
   local SESSFILE="$LOGDIR/$candidate"
   if grep -q '^<!-- SESSION CLOSED -->$' "$SESSFILE" 2>/dev/null; then
@@ -96,9 +104,13 @@ session_pending_count() {
 
 # Sets APPEND_FINDINGS (global) to the number of real findings logged, so
 # callers can pass cleanly (no block) when a round found nothing.
+# APPEND_UNPARSED (global) counts ❓ reviewers -- output that had neither
+# NO_ISSUES nor any parseable finding. Those may hide real findings, so
+# callers block once on them too instead of passing as "指摘なし".
 append_review_log() {
   local KIND="$1" REPO="$2" BRANCH="$3" REF="$4" OUTDIR="$5"
   APPEND_FINDINGS=0
+  APPEND_UNPARSED=0
 
   # Rows: sortA \t sortB \t rank \t icon \t loc \t ai \t finding
   #   sortA=0 real findings (sortB=location, version-sorted so :10 > :9)
@@ -148,6 +160,7 @@ append_review_log() {
     return 0   # no reviewer CLI available at all -- nothing to log
   fi
   APPEND_FINDINGS=$(awk -F'\t' '$1==0' "$ROWS" | wc -l)
+  APPEND_UNPARSED=$(awk -F'\t' '$1==1 && $3==7' "$ROWS" | wc -l)
 
   local AIROWS; AIROWS=$(mktemp)
   local badges=() r
@@ -194,6 +207,8 @@ append_review_log() {
       echo
       if [ "$APPEND_FINDINGS" -gt 0 ]; then
         echo "**Response:** _(pending)_"
+      elif [ "$APPEND_UNPARSED" -gt 0 ]; then
+        echo "**Response:** 形式外出力のみ・指摘としてはパース不能 (自動記入)"
       else
         echo "**Response:** 指摘なし (自動記入)"
       fi
@@ -220,7 +235,7 @@ close_session() {
   (
     flock -x 200
     local candidate
-    candidate=$(ls -1 "$LOGDIR" 2>/dev/null | grep -F "${REPO}__${branch_san}__" | sort -r | head -1)
+    candidate=$(_latest_session "$REPO" "$branch_san")
     [ -z "$candidate" ] && exit 0
     local SESSFILE="$LOGDIR/$candidate"
     grep -q '^<!-- SESSION CLOSED -->$' "$SESSFILE" 2>/dev/null && exit 0

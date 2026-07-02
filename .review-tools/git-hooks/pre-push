@@ -12,5 +12,8 @@ case "$ROOT" in
 esac
 # stdin lines: <local-ref> <local-sha> <remote-ref> <remote-sha>. Nothing to
 # review unless some line pushes a real commit (deletes have local-sha = 0*40).
+# The lines are forwarded so the review targets what is actually pushed, not
+# the checked-out branch.
 printf '%s\n' "$INPUT" | awk 'NF>=4 && $2 !~ /^0+$/ {found=1} END {exit !found}' || exit 0
-exec "/home/binnmti-qiqb-note/project/qiqb/.review-tools/review-push.sh"
+printf '%s\n' "$INPUT" | "/home/binnmti-qiqb-note/project/qiqb/.review-tools/review-push.sh"
+exit $?

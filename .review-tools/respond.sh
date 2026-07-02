@@ -25,7 +25,7 @@ LOCK=$(_global_lock)
   flock -x 200
   # Same file the push gate (session_pending_count) looks at: the most
   # recent session for this repo+branch.
-  candidate=$(ls -1 "$LOGDIR" 2>/dev/null | grep -F "${REPO}__$(_sanitize "$BR")__" | sort -r | head -1)
+  candidate=$(_latest_session "$REPO" "$(_sanitize "$BR")")
   [ -z "$candidate" ] && { echo "このブランチのレビューセッションがありません ($REPO @ $BR)" >&2; exit 0; }
   SESSFILE="$LOGDIR/$candidate"
   if ! grep -q '^\*\*Response:\*\* _(pending)_$' "$SESSFILE"; then
