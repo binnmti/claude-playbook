@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
+# Chains any repo-local pre-push hook, then runs the push-time review for
+# repos under project/qiqb. Fires on every push (Claude or human); skip with
+# git push --no-verify or REVIEW_SKIP=1.
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 loc="$ROOT/.git/hooks/pre-push"
-[ -x "$loc" ] && exec "$loc" "$@"
-exit 0
+INPUT=$(cat 2>/dev/null || true)
+if [ -x "$loc" ]; then printf '%s\n' "$INPUT" | "$loc" "$@" || exit $?; fi
+case "$ROOT" in
+  /home/binnmti-qiqb-note/project/qiqb/*) ;;
+  *) exit 0 ;;
+esac
+# stdin lines: <local-ref> <local-sha> <remote-ref> <remote-sha>. Nothing to
+# review unless some line pushes a real commit (deletes have local-sha = 0*40).
+printf '%s\n' "$INPUT" | awk 'NF>=4 && $2 !~ /^0+$/ {found=1} END {exit !found}' || exit 0
+exec "/home/binnmti-qiqb-note/project/qiqb/.review-tools/review-push.sh"

@@ -2,7 +2,7 @@
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 loc="$ROOT/.git/hooks/pre-commit"
 case "$ROOT" in
-  /home/binnmti-qiqb-note/project/qiqb/*) [ -x "$loc" ] && { "$loc" || exit $?; }; exec "/home/binnmti-qiqb-note/project/qiqb/.review-tools/review-staged.sh" ;;
+  /home/binnmti-qiqb-note/project/qiqb/*) [ -x "$loc" ] && { "$loc" || exit $?; }; exec "/home/binnmti-qiqb-note/project/qiqb/.review-tools/review-commit.sh" ;;
 esac
 [ -x "$loc" ] && exec "$loc"
 exit 0
