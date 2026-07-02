@@ -27,6 +27,13 @@ GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$GIT_ROOT" || exit 0
 [ "${REVIEW_SKIP:-}" = "1" ] && exit 0
 
+# Clean temp files on any exit -- including SIGTERM from an outer timeout
+# (e.g. the caller's Bash tool killing a long push). The per-reviewer
+# `timeout` below bounds orphaned reviewers if this script itself is killed.
+OUT=""; HISTCOPY=""
+trap '[ -n "$OUT" ] && rm -rf "$OUT"; [ -n "$HISTCOPY" ] && rm -f "$HISTCOPY"' EXIT
+trap 'exit 143' TERM INT
+
 BASE=""
 # Direct-push to a long-lived branch (e.g. monitoring repos that push straight
 # to develop): review only the commits this push adds, i.e. vs the SAME-named
@@ -103,6 +110,31 @@ if [ "$(cat "$PASS" 2>/dev/null)" = "$HEADSHA" ]; then
   finish_ok
 fi
 
+# Content-coverage skip: if every non-merge commit this push adds already
+# cleared push review on some branch (recorded as .review-lastrev-*), the
+# work was reviewed where it was built -- so merging a reviewed feature
+# branch into develop sails through, while direct/unreviewed commits keep
+# the gate. Caveat: conflict resolutions inside a merge commit go unreviewed.
+UNREV=$(git rev-list --no-merges "$RANGE_FROM"..HEAD)
+if [ -n "$UNREV" ]; then
+  COMMON=$(git rev-parse --git-common-dir)
+  for lr in "$COMMON"/.review-lastrev-* "$COMMON"/worktrees/*/.review-lastrev-*; do
+    [ -f "$lr" ] || continue
+    R=$(cat "$lr" 2>/dev/null)
+    git rev-parse --verify -q "$R^{commit}" >/dev/null 2>&1 || continue
+    COVERED=$(git rev-list --no-merges "$RANGE_FROM".."$R" 2>/dev/null)
+    [ -n "$COVERED" ] || continue
+    UNREV=$(printf '%s\n' "$UNREV" | grep -vxF -f <(printf '%s\n' "$COVERED"))
+    [ -z "$UNREV" ] && break
+  done
+fi
+if [ -z "$UNREV" ]; then
+  PENDING=$(session_pending_count "$REPO" "$BR")
+  [ "${PENDING:-0}" -gt 0 ] && pending_block "$PENDING"
+  echo "PRE-PUSH REVIEW: 追加コミットは全てレビュー済み — スキップ (${RANGE_FROM:0:10}..${HEADSHA:0:10})" >&2
+  finish_ok
+fi
+
 DIFF=$(git diff "$RANGE_FROM"...HEAD)
 [ -z "$DIFF" ] && exit 0
 FILES=$(git diff --name-only --diff-filter=ACMR "$RANGE_FROM"...HEAD)
@@ -138,12 +170,17 @@ $PROMPT"
 fi
 
 OUT=$(mktemp -d)
-{ command -v codex >/dev/null 2>&1 && printf '%s' "$PROMPT" | codex exec --sandbox read-only --skip-git-repo-check \
+# Each reviewer gets a hard deadline: the review must finish inside the
+# caller's patience (a stray reviewer otherwise runs on as an orphan burning
+# tokens when the push gets killed from outside). Timed-out reviewers show
+# up as ⚠ rows in the log.
+RVTIMEOUT=300
+{ command -v codex >/dev/null 2>&1 && printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
     -c model_reasoning_effort=medium > "$OUT/codex" 2>"$OUT/codex.err"
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"; } &
-{ command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | copilot --model auto --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
+{ command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" copilot --model auto --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
     | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"; } &
-{ command -v agy >/dev/null 2>&1 && printf '%s' "$PROMPT" | agy --print --sandbox 2>"$OUT/agy.err" \
+{ command -v agy >/dev/null 2>&1 && printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" agy --print --sandbox 2>"$OUT/agy.err" \
     | sed '/<message>/,/<\/message>/d' > "$OUT/agy"; } &
 wait
 
@@ -152,7 +189,6 @@ echo "$HEADSHA" > "$PASS"
 
 if [ "${APPEND_FINDINGS:-0}" = 0 ]; then
   echo "PRE-PUSH REVIEW (${RANGE_FROM:0:10}..${HEADSHA:0:10}): 指摘なし" >&2
-  rm -rf "$OUT"; rm -f "$HISTCOPY"
   PENDING=$(session_pending_count "$REPO" "$BR")
   [ "${PENDING:-0}" -gt 0 ] && pending_block "$PENDING"
   finish_ok
@@ -174,5 +210,4 @@ fi
   echo "Skip: git push --no-verify  /  REVIEW_SKIP=1 git push …"
 } >&2
 
-rm -rf "$OUT"; rm -f "$HISTCOPY"
 exit 2

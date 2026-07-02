@@ -10,6 +10,11 @@ GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$GIT_ROOT" || exit 0
 [ "${REVIEW_SKIP:-}" = "1" ] && exit 0
 
+# Clean temp files on any exit, including SIGTERM from an outer timeout.
+CTX=""; OUT=""; HISTCOPY=""
+trap '[ -n "$CTX" ] && rm -f "$CTX"; [ -n "$OUT" ] && rm -rf "$OUT"; [ -n "$HISTCOPY" ] && rm -f "$HISTCOPY"' EXIT
+trap 'exit 143' TERM INT
+
 STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
 [ -z "$STAGED" ] && exit 0
 
@@ -61,20 +66,23 @@ fi
 OUT=$(mktemp -d)
 # Prompt goes via stdin, not argv: a large staged change embedded as one argv
 # string overruns the kernel's 128KB per-argument limit and silently fails.
+# Each reviewer gets a hard deadline so a commit review always finishes
+# inside the caller's patience; timed-out reviewers show up as ⚠ rows.
+RVTIMEOUT=120
 run_codex() {
   command -v codex >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=low \
+  printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check -c model_reasoning_effort=low \
     > "$OUT/codex" 2>"$OUT/codex.err"
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"
 }
 run_copilot() {
   command -v copilot >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | copilot --model auto --log-level none 2>"$OUT/copilot.err" \
+  printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" copilot --model auto --log-level none 2>"$OUT/copilot.err" \
     | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"
 }
 run_agy() {
   command -v agy >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | agy --print --sandbox 2>"$OUT/agy.err" \
+  printf '%s' "$PROMPT" | timeout "$RVTIMEOUT" agy --print --sandbox 2>"$OUT/agy.err" \
     | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
 }
 run_codex & run_copilot & run_agy & wait
@@ -83,8 +91,6 @@ append_review_log "commit" "$REPO" "$BR" "${HASH:0:10}" "$OUT"
 
 if [ "${APPEND_FINDINGS:-0}" = 0 ]; then
   echo "PRE-COMMIT REVIEW: 指摘なし — コミットを通します (codex + copilot + agy)"
-  rm -rf "$CTX" "$OUT"
-  rm -f "$HISTCOPY"
   exit 0
 fi
 
@@ -103,6 +109,4 @@ echo "  $SELF/respond.sh \"指摘Aは修正、Bは誤検知 (理由)\""
 echo "Skip: git commit --no-verify  /  REVIEW_SKIP=1 git commit …"
 
 echo "$HASH" > "$PASS"
-rm -rf "$CTX" "$OUT"
-rm -f "$HISTCOPY"
 exit 1
