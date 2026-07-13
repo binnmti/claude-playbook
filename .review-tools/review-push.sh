@@ -211,13 +211,20 @@ $PROMPT"
 
   [ -n "$OUT" ] && rm -rf "$OUT"
   OUT=$(mktemp -d)
-  { command -v codex >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
+  { reviewer_on codex "$REVIEWERS_PUSH" && command -v codex >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
       -m "$CODEX_MODEL_PUSH" -c model_reasoning_effort="$CODEX_EFFORT_PUSH" > "$OUT/codex" 2>"$OUT/codex.err"
     grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"; } &
-  { command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_PUSH" --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
+  { reviewer_on copilot "$REVIEWERS_PUSH" && command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_PUSH" --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
       | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"; } &
-  { command -v agy >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --print --sandbox --model "$AGY_MODEL_PUSH" 2>"$OUT/agy.err" \
+  { reviewer_on agy "$REVIEWERS_PUSH" && command -v agy >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_PUSH" 2>"$OUT/agy.err" \
       | sed '/<message>/,/<\/message>/d' > "$OUT/agy"; } &
+  # vllm is a bare model, not an agent -- it can't run git itself, so embed
+  # the diff (capped) after the shared prompt.
+  { if reviewer_on vllm "$REVIEWERS_PUSH"; then
+      { printf '%s\n\n=== 変更差分 (このレビュアーはコマンド実行不可のため埋め込み) ===\n' "$PROMPT"
+        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 \
+        | vllm_chat "$VLLM_MODEL_PUSH" > "$OUT/vllm" 2>"$OUT/vllm.err"
+    fi; } &
   wait
 
   append_review_log "branch" "$REPO" "$BR" "${RANGE_FROM:0:10}..${SHA:0:10}" "$OUT"
@@ -232,9 +239,9 @@ $PROMPT"
 
   {
     echo "════════════════════════════════════════════════════════"
-    echo " PRE-PUSH REVIEW  (${RANGE_FROM:0:10}..${SHA:0:10})  — codex + copilot + agy — Claude curates"
+    echo " PRE-PUSH REVIEW  (${RANGE_FROM:0:10}..${SHA:0:10})  — ${REVIEWERS_PUSH} — Claude curates"
     echo "════════════════════════════════════════════════════════"
-    for r in codex copilot agy; do
+    for r in codex copilot agy vllm; do
       body=$(sed '/^[[:space:]]*$/d' "$OUT/$r" 2>/dev/null)
       [ -z "$body" ] && continue
       echo; echo "### $r"; echo "$body"

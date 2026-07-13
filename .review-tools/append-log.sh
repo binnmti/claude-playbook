@@ -22,9 +22,25 @@
 # Per-AI status badge: ✅ no issues   ❌N  N findings (severity breakdown is
 # in the table below)   ⚠ no output (crash/timeout suspected)   ❓ output
 # didn't follow the expected bullet format (raw text kept below)   — CLI not
-# installed, never ran.
+# installed or disabled in models.conf, never ran.
 
 _sanitize() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-'; }
+
+# reviewer_on <name> <enabled-list> -- is this reviewer in the phase's list?
+reviewer_on() { case " ${2:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# vllm_chat <model> -- OpenAI-compatible chat call, prompt on stdin, answer on
+# stdout. Used for reviewers that are a bare model behind an API, not an agent
+# CLI, so the caller must embed everything the model needs in the prompt.
+vllm_chat() {
+  python3 -c 'import json,sys; print(json.dumps({"model":sys.argv[1],"temperature":0,"messages":[{"role":"user","content":sys.stdin.read()}]}))' "$1" \
+  | curl -sS -m "${RVTIMEOUT:-120}" "$VLLM_BASE_URL/chat/completions" \
+      -H "Authorization: Bearer $VLLM_API_KEY" -H 'Content-Type: application/json' \
+      --data-binary @- \
+  | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(d["choices"][0]["message"]["content"])'
+}
 
 _global_lock() {
   mkdir -p "$SELF/log"
@@ -116,7 +132,7 @@ append_review_log() {
   #   sortA=0 real findings (sortB=location, version-sorted so :10 > :9)
   #   sortA=1 status rows -- no issues(9) / no output(8) / unparsed(7)
   local ROWS; ROWS=$(mktemp)
-  for r in codex copilot agy; do
+  for r in codex copilot agy vllm; do
     local f="$OUTDIR/$r"
     [ -e "$f" ] || continue   # CLI not installed -- this reviewer never ran
     # unwrap markdown links (agy emits `[path:N](file://…)` inside the
@@ -163,29 +179,44 @@ append_review_log() {
   APPEND_UNPARSED=$(awk -F'\t' '$1==1 && $3==7' "$ROWS" | wc -l)
 
   local AIROWS; AIROWS=$(mktemp)
-  local badges=() r
-  for r in codex copilot agy; do
+  local BADGELINE="" badge r
+  for r in codex copilot agy vllm; do
     awk -F'\t' -v ai="$r" '$6==ai' "$ROWS" > "$AIROWS"
     if [ ! -s "$AIROWS" ]; then
-      badges+=("—")
-      continue
-    fi
-    local n; n=$(awk -F'\t' '$1==0' "$AIROWS" | wc -l)
-    if [ "$n" -gt 0 ]; then
-      badges+=("❌${n}")
+      badge="—"
     else
-      local rank; rank=$(awk -F'\t' '{print $3}' "$AIROWS" | head -1)
-      case "$rank" in
-        9) badges+=("✅") ;;
-        8) badges+=("⚠") ;;
-        *) badges+=("❓") ;;
-      esac
+      local n; n=$(awk -F'\t' '$1==0' "$AIROWS" | wc -l)
+      if [ "$n" -gt 0 ]; then
+        badge="❌${n}"
+      else
+        local rank; rank=$(awk -F'\t' '{print $3}' "$AIROWS" | head -1)
+        case "$rank" in
+          9) badge="✅" ;;
+          8) badge="⚠" ;;
+          *) badge="❓" ;;
+        esac
+      fi
     fi
+    BADGELINE="${BADGELINE:+$BADGELINE  ·  }$r $badge"
   done
   rm -f "$AIROWS"
 
   local DISPLAY_TS; DISPLAY_TS=$(date '+%Y-%m-%d %H:%M %Z')
-  local BADGELINE="codex ${badges[0]}  ·  copilot ${badges[1]}  ·  agy ${badges[2]}"
+
+  # which model each enabled reviewer ran with, from the models.conf vars
+  # (<NAME>_MODEL_<PHASE>) -- one compact line inside the details body so the
+  # summary row stays short
+  local PH LIST MLINE="" mr mv m
+  case "$KIND" in
+    commit) PH=COMMIT; LIST="${REVIEWERS_COMMIT:-}" ;;
+    *)      PH=PUSH;   LIST="${REVIEWERS_PUSH:-}" ;;
+  esac
+  for mr in $LIST; do
+    mv="${mr^^}_MODEL_${PH}"; m="${!mv:-}"
+    [ -z "$m" ] && continue
+    if [ "$mr" = codex ]; then mv="CODEX_EFFORT_${PH}"; m="$m/${!mv:-}"; fi
+    MLINE="${MLINE:+$MLINE · }${mr}=${m}"
+  done
 
   local SORTED; SORTED=$(mktemp)
   sort -t $'\t' -k1,1n -k2,2V -k3,3n "$ROWS" > "$SORTED"
@@ -198,6 +229,7 @@ append_review_log() {
       echo "<details>"
       echo "<summary>${DISPLAY_TS} — (${KIND}, \`${REF}\`) — ${BADGELINE}</summary>"
       echo
+      [ -n "$MLINE" ] && { echo "_models: ${MLINE}_"; echo; }
       echo "| 重大度 | 場所 | AI | 指摘 |"
       echo "|---|---|---|---|"
       while IFS=$'\t' read -r _sortA _sortB _rank icon loc ai finding; do

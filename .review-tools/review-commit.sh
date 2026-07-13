@@ -78,6 +78,7 @@ RVTIMEOUT=120
 # every reviewer subprocess.
 GITENV=(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_COMMON_DIR)
 run_codex() {
+  reviewer_on codex "$REVIEWERS_COMMIT" || return
   command -v codex >/dev/null 2>&1 || return
   printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
     -m "$CODEX_MODEL_COMMIT" -c model_reasoning_effort="$CODEX_EFFORT_COMMIT" \
@@ -85,28 +86,35 @@ run_codex() {
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"
 }
 run_copilot() {
+  reviewer_on copilot "$REVIEWERS_COMMIT" || return
   command -v copilot >/dev/null 2>&1 || return
   printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_COMMIT" --log-level none 2>"$OUT/copilot.err" \
     | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"
 }
 run_agy() {
+  reviewer_on agy "$REVIEWERS_COMMIT" || return
   command -v agy >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --print --sandbox --model "$AGY_MODEL_COMMIT" 2>"$OUT/agy.err" \
+  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_COMMIT" 2>"$OUT/agy.err" \
     | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
 }
-run_codex & run_copilot & run_agy & wait
+run_vllm() {
+  reviewer_on vllm "$REVIEWERS_COMMIT" || return
+  printf '%s' "$PROMPT" | head -c 60000 \
+    | vllm_chat "$VLLM_MODEL_COMMIT" > "$OUT/vllm" 2>"$OUT/vllm.err"
+}
+run_codex & run_copilot & run_agy & run_vllm & wait
 
 append_review_log "commit" "$REPO" "$BR" "${HASH:0:10}" "$OUT"
 
 if [ "${APPEND_FINDINGS:-0}" = 0 ] && [ "${APPEND_UNPARSED:-0}" = 0 ]; then
-  echo "PRE-COMMIT REVIEW: 指摘なし — コミットを通します (codex + copilot + agy)"
+  echo "PRE-COMMIT REVIEW: 指摘なし — コミットを通します (${REVIEWERS_COMMIT})"
   exit 0
 fi
 
 echo "────────────────────────────────────────────────────────"
-echo " PRE-COMMIT REVIEW  (codex + copilot + agy)  — Claude curates"
+echo " PRE-COMMIT REVIEW  (${REVIEWERS_COMMIT})  — Claude curates"
 echo "────────────────────────────────────────────────────────"
-for r in codex copilot agy; do
+for r in codex copilot agy vllm; do
   body=$(sed '/^[[:space:]]*$/d' "$OUT/$r" 2>/dev/null)
   [ -z "$body" ] && continue
   echo; echo "### $r"; echo "$body"
