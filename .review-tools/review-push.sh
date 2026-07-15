@@ -70,7 +70,7 @@ pending_block() {
     echo " push ブロック: このブランチのレビューセッションに Response 未記入の"
     echo " ラウンドが $1 件残っています。各ラウンドの指摘への対応 (修正した/"
     echo " 誤検知(理由)) を1行ずつ記録してから、もう一度 push してください:"
-    echo "   $SELF/respond.sh \"指摘Aは修正 (コミットX)、Bは誤検知 (理由)\""
+    echo "   $SELF/respond.sh \"1:fix/h 直した内容 2:fp 誤検知の理由\"  (fix|fp|skip|dup, /h /m /l 任意)"
     echo " Skip: git push --no-verify  /  REVIEW_SKIP=1 git push …"
     echo "════════════════════════════════════════════════════════"
   } >&2
@@ -249,7 +249,7 @@ $PROMPT"
     echo "════════════════════════════════════════════════════════"
     echo "Curate, address what matters (new commits), then push again."
     echo "各ラウンドの指摘への対応を1行ずつ記録してください (pending が残ると push できません):"
-    echo "  $SELF/respond.sh \"指摘Aは修正 (コミットX)、Bは誤検知 (理由)\""
+    echo "  $SELF/respond.sh \"1:fix/h 直した内容 2:fp 誤検知の理由\"  (fix|fp|skip|dup, /h /m /l 任意)"
     if [ "${APPEND_FINDINGS:-0}" = 0 ]; then
       echo "※ 今回はパース不能な形式外出力 (❓) のみ。内容に実質的な指摘が無ければ"
       echo "  そのまま再 push で通ります (Response は自動記入済み、respond.sh 不要)。"

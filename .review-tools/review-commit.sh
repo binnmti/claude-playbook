@@ -122,7 +122,7 @@ done
 echo "────────────────────────────────────────────────────────"
 echo "Curate the above, fix what matters, then re-commit (同一内容の再コミットは通ります)."
 echo "その後、この回の指摘への対応を1行で記録してください (push までに必須):"
-echo "  $SELF/respond.sh \"指摘Aは修正、Bは誤検知 (理由)\""
+echo "  $SELF/respond.sh \"1:fix/h 直した内容 2:fp 誤検知の理由\"  (fix|fp|skip|dup, /h /m /l 任意)"
 if [ "${APPEND_FINDINGS:-0}" = 0 ]; then
   echo "※ 今回はパース不能な形式外出力 (❓) のみ。内容に実質的な指摘が無ければ"
   echo "  そのまま再コミットで通ります (Response は自動記入済み、respond.sh 不要)。"

@@ -230,11 +230,15 @@ append_review_log() {
       echo "<summary>${DISPLAY_TS} — (${KIND}, \`${REF}\`) — ${BADGELINE}</summary>"
       echo
       [ -n "$MLINE" ] && { echo "_models: ${MLINE}_"; echo; }
-      echo "| 重大度 | 場所 | AI | 指摘 |"
-      echo "|---|---|---|---|"
+      echo "| # | 重大度 | 場所 | AI | 指摘 |"
+      echo "|---|---|---|---|---|"
+      # findings get a per-round number so respond.sh verdicts (`1:fix/h`)
+      # can reference them; status rows (✅⚠❓) get none
+      local FNUM=0 num
       while IFS=$'\t' read -r _sortA _sortB _rank icon loc ai finding; do
         [ "$loc" != "—" ] && loc="\`$loc\`"
-        printf '| %s | %s | %s | %s |\n' "$icon" "$loc" "$ai" "$finding"
+        if [ "$_sortA" = 0 ]; then FNUM=$((FNUM+1)); num=$FNUM; else num="—"; fi
+        printf '| %s | %s | %s | %s | %s |\n' "$num" "$icon" "$loc" "$ai" "$finding"
       done < "$SORTED"
       echo
       if [ "$APPEND_FINDINGS" -gt 0 ]; then
