@@ -5,8 +5,11 @@ tokscale (junhoyeo/tokscale, antigravity_cli.rs) の解析結果に依拠した�
 スキーマなので、agy 更新で沈黙する可能性あり (その場合 usage 行が消えるだけ)。
 
 usage: agy-usage.py <start-epoch>
-start-epoch 以降に更新された会話 DB の全 generation を合算し、
+start-epoch 以降に「作成された」会話 DB の全 generation を合算し、
 "tokens in=N out=M" を出力 (in=システム+新規+cacheRead, out=本文+thinking)。
+作成時刻は trajectory_metadata_blob.#2.#1 (秒)。mtime では判定しない --
+agy は起動時に既存の会話 DB に触れて mtime を進めることがあり、mtime 基準だと
+全履歴を合算してしまう (1.3億トークンの異常値を記録した実績あり)。
 """
 import glob, os, sqlite3, sys
 
@@ -46,6 +49,18 @@ def field(buf, no):
             return v
     return None
 
+def created_at(conn):
+    try:
+        row = conn.execute("SELECT data FROM trajectory_metadata_blob LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    ts = field(row[0], 2)
+    if ts is None:
+        return None
+    return next((v for f, w, v in fields(ts) if f == 1 and w == 0), None)
+
 start = float(sys.argv[1])
 tin = tout = 0
 for db in glob.glob(os.path.expanduser("~/.gemini/antigravity-cli/conversations/*.db")):
@@ -53,6 +68,9 @@ for db in glob.glob(os.path.expanduser("~/.gemini/antigravity-cli/conversations/
         continue
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        c = created_at(conn)
+        if c is None or c < start:
+            continue
         rows = conn.execute("SELECT data FROM gen_metadata").fetchall()
     except sqlite3.Error:
         continue
