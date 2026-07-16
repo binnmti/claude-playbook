@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Commit-time review (fires on `git commit`). Runs codex + copilot + agy over
-# the staged diff AND the full contents of changed files. Clean review (no
-# findings) passes immediately; findings block the commit once so they can be
-# curated, and a second identical commit passes.
+# Commit-time review (fires on `git commit`). Reviewers read the staged diff
+# from an in-tree file and pull full file contents from the working tree
+# themselves (nothing is embedded in the prompt except for vllm). Clean review
+# (no findings) passes immediately; findings block the commit once so they can
+# be curated, and a second identical commit passes.
 # Bypass: git commit --no-verify, or REVIEW_SKIP=1 git commit …
 set -uo pipefail
 
@@ -10,9 +11,16 @@ GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$GIT_ROOT" || exit 0
 [ "${REVIEW_SKIP:-}" = "1" ] && exit 0
 
+# Master switch: reviews fire only where someone created .review-tools/.env
+# (see .env.sample) with REVIEW_ENABLED=1. Keeps ports of this tree inert
+# until opted in.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SELF/.env" ] && . "$SELF/.env"
+[ "${REVIEW_ENABLED:-0}" = "1" ] || exit 0
+
 # Clean temp files on any exit, including SIGTERM from an outer timeout.
-CTX=""; OUT=""; HISTCOPY=""
-trap '[ -n "$CTX" ] && rm -f "$CTX"; [ -n "$OUT" ] && rm -rf "$OUT"; [ -n "$HISTCOPY" ] && rm -f "$HISTCOPY"' EXIT
+OUT=""; HISTCOPY=""; DIFFCOPY=""
+trap '[ -n "$OUT" ] && rm -rf "$OUT"; [ -n "$HISTCOPY" ] && rm -f "$HISTCOPY"; [ -n "$DIFFCOPY" ] && rm -f "$DIFFCOPY"' EXIT
 trap 'exit 143' TERM INT
 
 STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
@@ -26,7 +34,6 @@ HASH=$(printf '%s' "$DIFF" | sha1sum | cut -d' ' -f1)
 PASS="$(git rev-parse --git-path .review-passed)"
 [ "$(cat "$PASS" 2>/dev/null)" = "$HASH" ] && exit 0
 
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF/append-log.sh"
 . "$SELF/models.conf"
 REPO=$(basename "$GIT_ROOT")
@@ -45,20 +52,22 @@ if [ -n "$HISTFILES" ]; then
   printf '%s\n' "$HISTFILES" | while IFS= read -r hf; do cat "$hf"; done > "$HISTCOPY"
 fi
 
-# Build context: diff + full contents of changed files (capped).
-CTX=$(mktemp); MAXFILES=15; MAXLINES=800; n=0
-{
-  echo "=== STAGED DIFF ==="; echo "$DIFF"
-  echo; echo "=== FULL CONTENTS OF CHANGED FILES ==="
-  while IFS= read -r f; do
-    [ -f "$f" ] || continue
-    n=$((n+1)); [ "$n" -gt "$MAXFILES" ] && { echo "(…more files omitted)"; break; }
-    echo; echo "----- $f -----"; head -n "$MAXLINES" "$f"
-    [ "$(wc -l <"$f")" -gt "$MAXLINES" ] && echo "(…file truncated at ${MAXLINES} lines)"
-  done <<< "$STAGED"
-} > "$CTX"
+# The staged diff goes via an in-tree file, never embedded in the prompt (a
+# big commit used to overrun the CLIs' prompt limits). Reviewers must read
+# this file rather than run `git diff --cached` themselves: with `git commit
+# -a` the staged content lives in a temp GIT_INDEX_FILE that GITENV strips
+# from every reviewer subprocess, so their own git would see a stale index.
+DIFFDIR=.git; [ -d .git ] || DIFFDIR=.
+DIFFCOPY="$DIFFDIR/.review-staged-diff.$$.patch"
+printf '%s\n' "$DIFF" > "$DIFFCOPY"
 
-PROMPT="$(cat "$SELF/prompt-commit.md")"$'\n\n'"$(cat "$CTX")"
+PROMPT="$(cat "$SELF/prompt-commit.md")
+
+今回コミットされる staged 差分は次のファイルにあります (hook が書き出したもの): $DIFFCOPY
+これを読んでレビューしてください。必要な変更ファイルの全文は working tree で読めます。差分はこのプロンプトに埋め込んでいません。
+
+変更ファイル:
+${STAGED}"
 if [ -n "$HISTCOPY" ]; then
   PROMPT="このリポジトリ+ブランチで過去に報告済みのレビュー指摘の記録が次のファイルにあります: $HISTCOPY
 Response 未記入の指摘も含め、すべて既に報告済みです。該当コードが変わっていない限り、同じ指摘を繰り返さないこと。コードが変わった箇所や、記録に無い新しい問題は遠慮なく指摘すること。
@@ -94,12 +103,22 @@ run_copilot() {
 run_agy() {
   reviewer_on agy "$REVIEWERS_COMMIT" || return
   command -v agy >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_COMMIT" 2>"$OUT/agy.err" \
+  local T0; T0=$(date +%s)
+  # headless agy はファイル読み取り/コマンド実行の許可を非決定的に auto-deny する
+  # (settings.json の allow ルールは起動時に剥がされ効かない) ので、DIFFCOPY を
+  # 確実には読めない -- vllm と同様に差分を埋め込む (capped)。
+  { printf '%s\n\n=== staged 差分 (このレビュアーはファイル読み取り不可のため埋め込み) ===\n' "$PROMPT"
+    printf '%s\n' "$DIFF"; } | head -c 60000 \
+    | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_COMMIT" 2>"$OUT/agy.err" \
     | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
+  python3 "$SELF/agy-usage.py" "$T0" >> "$OUT/agy.err" 2>/dev/null
 }
 run_vllm() {
   reviewer_on vllm "$REVIEWERS_COMMIT" || return
-  printf '%s' "$PROMPT" | head -c 60000 \
+  # vllm is a bare model, not an agent -- it can't read files, so embed the
+  # diff (capped) after the shared prompt.
+  { printf '%s\n\n=== staged 差分 (このレビュアーはファイル読み取り不可のため埋め込み) ===\n' "$PROMPT"
+    printf '%s\n' "$DIFF"; } | head -c 60000 \
     | vllm_chat "$VLLM_MODEL_COMMIT" > "$OUT/vllm" 2>"$OUT/vllm.err"
 }
 run_codex & run_copilot & run_agy & run_vllm & wait

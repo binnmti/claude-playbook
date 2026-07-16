@@ -39,7 +39,34 @@ vllm_chat() {
       --data-binary @- \
   | python3 -c 'import json,sys
 d=json.load(sys.stdin)
+u=d.get("usage") or {}
+print("tokens in=%s out=%s" % (u.get("prompt_tokens",0), u.get("completion_tokens",0)), file=sys.stderr)
 print(d["choices"][0]["message"]["content"])'
+}
+
+# _ktoi 14.2k -> 14200
+_ktoi() { awk -v s="$1" 'BEGIN{if(s~/k$/){sub(/k$/,"",s);s*=1000}printf "%d",s}'; }
+
+# tokens/credits a reviewer reported on stderr, empty if none. codex prints a
+# total after "tokens used", copilot prints ↑/↓ tokens + AI Credits, vllm_chat
+# echoes the API usage field, agy records nothing itself so the hooks append
+# an agy-usage.py line (conversation DB decode) to agy.err after the run.
+_usage_of() {
+  local r="$1" err="$2/$1.err"
+  [ -s "$err" ] || return 0
+  case "$r" in
+    codex)
+      awk '/^tokens used$/{getline;gsub(/,/,"");if($0~/^[0-9]+$/)print $0"tok";exit}' "$err" ;;
+    copilot)
+      local tin tout cr
+      tin=$(sed -n 's/.*↑ \([0-9.]*k\?\).*/\1/p' "$err" | head -1)
+      tout=$(sed -n 's/.*↓ \([0-9.]*k\?\).*/\1/p' "$err" | head -1)
+      cr=$(sed -n 's/^AI Credits \([0-9.]*\).*/\1/p' "$err" | head -1)
+      [ -n "$tin$tout$cr" ] || return 0
+      printf '%s↑/%s↓%s' "$(_ktoi "${tin:-0}")" "$(_ktoi "${tout:-0}")" "${cr:+ ${cr}cr}" ;;
+    agy|vllm)
+      sed -n 's/^tokens in=\([0-9]*\) out=\([0-9]*\)$/\1↑\/\2↓/p' "$err" | tail -1 ;;
+  esac
 }
 
 _global_lock() {
@@ -218,6 +245,12 @@ append_review_log() {
     MLINE="${MLINE:+$MLINE · }${mr}=${m}"
   done
 
+  local ULINE="" u
+  for mr in codex copilot agy vllm; do
+    u=$(_usage_of "$mr" "$OUTDIR")
+    [ -n "$u" ] && ULINE="${ULINE:+$ULINE · }${mr}=${u}"
+  done
+
   local SORTED; SORTED=$(mktemp)
   sort -t $'\t' -k1,1n -k2,2V -k3,3n "$ROWS" > "$SORTED"
 
@@ -230,6 +263,7 @@ append_review_log() {
       echo "<summary>${DISPLAY_TS} — (${KIND}, \`${REF}\`) — ${BADGELINE}</summary>"
       echo
       [ -n "$MLINE" ] && { echo "_models: ${MLINE}_"; echo; }
+      [ -n "$ULINE" ] && { echo "_usage: ${ULINE}_"; echo; }
       echo "| # | 重大度 | 場所 | AI | 指摘 |"
       echo "|---|---|---|---|---|"
       # findings get a per-round number so respond.sh verdicts (`1:fix/h`)

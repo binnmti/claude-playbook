@@ -19,7 +19,14 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
 VERDICT = re.compile(r"(?:^|\s)(\d+):(fix|fp|skip|dup)(?:/([hml]))?")
 SUMMARY = re.compile(r"<summary>(.+?) — \((\w+), `(.+?)`\) — (.*)</summary>")
 SEV_ICON = {"high": "🔴", "med": "🟡", "low": "🟢"}
+SEV_WORD = {"h": "high", "m": "med", "l": "low"}
 VLABEL = {"fix": "採用", "fp": "誤検知", "skip": "対応せず", "dup": "既報"}
+VICON = {"fix": "✅", "fp": "❌", "skip": "⏭", "dup": "♻️"}
+AI_ICON = {"codex": "⚡", "copilot": "🐙", "agy": "✨", "vllm": "🦙"}
+KIND_ICON = {"commit": "📝", "branch": "🚀"}
+
+def ai_label(ai):
+    return f'{AI_ICON.get(ai, "🤖")} {ai}'
 STATS_SINCE = "20260714"  # first day with numbered findings + structured verdicts
 
 # ---------- parsing ----------
@@ -45,7 +52,7 @@ def parse_session(path):
         m = SUMMARY.search(line)
         if m:
             cur = {"ts": m.group(1), "kind": m.group(2), "ref": m.group(3),
-                   "badges": m.group(4), "models": {}, "rows": [], "response": ""}
+                   "badges": m.group(4), "models": {}, "usage": {}, "rows": [], "response": ""}
             rounds.append(cur)
             continue
         if cur is None:
@@ -57,6 +64,11 @@ def parse_session(path):
                 if "=" in pair:
                     ai, mv = pair.split("=", 1)
                     cur["models"][ai.strip()] = mv.strip()
+        elif line.startswith("_usage: ") and line.endswith("_"):
+            for pair in line[8:-1].split(" · "):
+                if "=" in pair:
+                    ai, uv = pair.split("=", 1)
+                    cur["usage"][ai.strip()] = uv.strip()
         elif line.startswith("|") and not re.match(r"^\|[-| ]+\|$", line):
             cells = split_cells(line)
             if cells and cells[0] in ("#", "重大度"):
@@ -104,6 +116,23 @@ def state_version():
 
 # ---------- stats ----------
 
+def parse_usage(s):
+    """'2746tok' / '14200↑/21↓ 0.44cr' / '13290↑/57↓' -> (tokens, credits)"""
+    tok, cr = 0, 0.0
+    m = re.search(r"(\d+)tok", s)
+    if m:
+        tok += int(m.group(1))
+    m = re.search(r"(\d+)↑/(\d+)↓", s)
+    if m:
+        tok += int(m.group(1)) + int(m.group(2))
+    m = re.search(r"([\d.]+)cr", s)
+    if m:
+        cr = float(m.group(1))
+    return tok, cr
+
+def fmt_tok(n):
+    return f"{n/1000:.1f}k" if n >= 10000 else str(n)
+
 def sev_of(icon):
     for k in ("high", "med", "low"):
         if k in icon:
@@ -111,11 +140,13 @@ def sev_of(icon):
     return None
 
 def collect_stats():
-    per_ai, per_model, trans = {}, {}, {}
-    tot = {"sessions": 0, "rounds": 0, "findings": 0, "judged": 0, "fp": 0}
+    per_ai, per_model, trans = {}, {}, []
+    tot = {"sessions": 0, "rounds": 0, "findings": 0, "judged": 0, "fp": 0,
+           "tok": 0, "cr": 0.0}
     def slot(d, k):
         return d.setdefault(k, {"findings": 0, "fix": 0, "fp": 0, "skip": 0,
-                                "dup": 0, "rounds": 0, "warn": 0, "unparsed": 0})
+                                "dup": 0, "rounds": 0, "warn": 0, "unparsed": 0,
+                                "tok": 0, "cr": 0.0})
     for s in list_sessions():
         # pre-numbering sessions can never be judged (free-text Responses,
         # no models line) -- they'd only add "?" model rows and 0% noise
@@ -125,6 +156,14 @@ def collect_stats():
         tot["sessions"] += 1
         for r in info["rounds"]:
             tot["rounds"] += 1
+            for ai, us in r["usage"].items():
+                utok, ucr = parse_usage(us)
+                tot["tok"] += utok
+                tot["cr"] += ucr
+                for d, k in ((per_ai, ai), (per_model, f'{ai} · {r["models"].get(ai, "?")}')):
+                    sl = slot(d, k)
+                    sl["tok"] += utok
+                    sl["cr"] += ucr
             seen_ai = set()
             for row in r["rows"]:
                 ai = row["ai"]
@@ -151,9 +190,10 @@ def collect_stats():
                         slot(d, k)[vd["v"]] += 1
                     rs = sev_of(row["sev"])
                     if vd["sev"] and rs:
-                        ws = {"h": "high", "m": "med", "l": "low"}[vd["sev"]]
+                        ws = SEV_WORD[vd["sev"]]
                         if ws != rs:
-                            trans[(rs, ws, ai)] = trans.get((rs, ws, ai), 0) + 1
+                            trans.append({"from": rs, "to": ws, "ai": ai, "s": s,
+                                          "num": row["num"], "loc": row["loc"]})
     return tot, per_ai, per_model, trans
 
 # ---------- rendering ----------
@@ -166,31 +206,37 @@ def md_inline(text):
 
 def chip(v, sev=None):
     extra = f"/{sev}" if sev else ""
-    return f'<span class="chip {v}">{VLABEL[v]}{extra}</span>'
+    return f'<span class="chip {v}">{VICON[v]} {VLABEL[v]}{extra}</span>'
 
 def render_response(resp):
     if resp == "_(pending)_":
-        return '<span class="chip pending">Response 未記入</span>'
+        return '<span class="chip pending">✏️ Response 未記入</span>'
     def rep(m):
         return f'{" " if m.group(0)[0].isspace() else ""}<b>#{m.group(1)}</b> ' + chip(m.group(2), m.group(3))
     return VERDICT.sub(rep, md_inline(resp))
 
 def render_round(r, open_):
     h = [f'<details{" open" if open_ else ""}><summary><b>{html.escape(r["ts"])}</b>'
-         f' — {r["kind"]} <code>{html.escape(r["ref"])}</code> — {html.escape(r["badges"])}</summary>']
+         f' — {KIND_ICON.get(r["kind"], "")} {r["kind"]} <code>{html.escape(r["ref"])}</code> — {html.escape(r["badges"])}</summary>']
     if r["models"]:
         h.append('<div class="models">' + html.escape(" · ".join(f"{k}={v}" for k, v in r["models"].items())) + "</div>")
+    if r["usage"]:
+        h.append('<div class="models">🪙 ' + html.escape(" · ".join(f"{k}={v}" for k, v in r["usage"].items())) + "</div>")
     h.append("<table><tr><th>#</th><th>重大度</th><th>場所</th><th>AI</th><th>指摘</th><th>裁定</th></tr>")
     for row in r["rows"]:
         vd = r["verdicts"].get(row["num"]) if row["num"] else None
         vcell = ""
         if vd:
-            vcell = chip(vd["v"], vd["sev"]) + (f' {md_inline(vd["reason"])}' if vd["reason"] else "")
+            vcell = chip(vd["v"], vd["sev"])
+            rs = sev_of(row["sev"])
+            if vd["sev"] and rs and SEV_WORD[vd["sev"]] != rs:
+                vcell += f' <span class="nowrap">重大度 {SEV_ICON[rs]} → {SEV_ICON[SEV_WORD[vd["sev"]]]}</span>'
+            vcell += f' {md_inline(vd["reason"])}' if vd["reason"] else ""
         elif row["num"] and r["pending"]:
             vcell = '<span class="dim">—</span>'
         h.append("<tr><td>%s</td><td class='nowrap'>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             row["num"] or "", html.escape(row["sev"]), html.escape(row["loc"]),
-            html.escape(row["ai"]), md_inline(row["text"]), vcell))
+            ai_label(html.escape(row["ai"])), md_inline(row["text"]), vcell))
     h.append("</table>")
     h.append(f'<div class="resp"><b>Response:</b> {render_response(r["response"])}</div>')
     h.append("</details>")
@@ -211,65 +257,91 @@ def page_session(name, closed):
     return "\n".join(h)
 
 def stat_table(title, d):
-    h = [f"<h2>{title}</h2><table><tr><th></th><th>rounds</th><th>指摘</th><th>採用</th>"
-         "<th>誤検知</th><th>対応せず</th><th>既報</th><th>誤検知率</th><th>⚠</th><th>❓</th></tr>"]
+    h = [f'<h2>{title}</h2><table class="compact"><tr><th></th><th>rounds</th><th>指摘</th><th>採用</th>'
+         "<th>誤検知</th><th>対応せず</th><th>既報</th><th>誤検知率</th><th>🪙 トークン</th><th>💳 費用</th><th>⚠</th><th>❓</th></tr>"]
+    rows = []
     for k in sorted(d, key=lambda k: -d[k]["findings"]):
         s = d[k]
         judged = s["fix"] + s["fp"] + s["skip"] + s["dup"]
-        rate = f'{100 * s["fp"] / judged:.0f}%' if judged else '<span class="dim">—</span>'
-        h.append(f"<tr><td>{html.escape(k)}</td><td>{s['rounds']}</td><td>{s['findings']}</td>"
-                 f"<td>{s['fix']}</td><td>{s['fp']}</td><td>{s['skip']}</td><td>{s['dup']}</td>"
-                 f"<td>{rate}</td><td>{s['warn']}</td><td>{s['unparsed']}</td></tr>")
+        rows.append((k, s, 100 * s["fp"] / judged if judged else None))
+    # best-in-column highlight, only meaningful with something to compare
+    best_fix = max((s["fix"] for _, s, _ in rows), default=0) if len(rows) > 1 else 0
+    rates = [r for _, _, r in rows if r is not None]
+    best_rate = min(rates) if len(rows) > 1 and rates else None
+    for k, s, rate in rows:
+        fixc = ' class="best"' if best_fix and s["fix"] == best_fix else ""
+        ratec = ' class="best"' if rate is not None and rate == best_rate else ""
+        ratestr = f'{rate:.0f}%' if rate is not None else '<span class="dim">—</span>'
+        tokstr = fmt_tok(s["tok"]) if s["tok"] else '<span class="dim">—</span>'
+        crstr = f'{s["cr"]:.2f}cr' if s["cr"] else '<span class="dim">—</span>'
+        h.append(f"<tr><td>{AI_ICON.get(k.split(' · ')[0], '🤖')} {html.escape(k)}</td><td>{s['rounds']}</td><td>{s['findings']}</td>"
+                 f"<td{fixc}>{s['fix']}</td><td>{s['fp']}</td><td>{s['skip']}</td><td>{s['dup']}</td>"
+                 f"<td{ratec}>{ratestr}</td><td>{tokstr}</td><td>{crstr}</td><td>{s['warn']}</td><td>{s['unparsed']}</td></tr>")
+    h.append("</table>")
+    return "\n".join(h)
+
+def session_table(items, closed):
+    if not items:
+        return '<p class="dim">なし</p>'
+    h = ['<table class="compact"><tr><th>日時</th><th>セッション</th><th>ラウンド</th>'
+         + ("" if closed else "<th>Response未記入</th>") + "</tr>"]
+    for s in items:
+        info = parse_session(s["path"])
+        day = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
+        link = (f'<a href="/log/{"closed/" if closed else ""}{s["file"]}">'
+                f'<b>{html.escape(s["repo"])}</b> @ <code>{html.escape(s["branch"])}</code></a>')
+        row = (f'<tr><td class="nowrap dim">{day}</td><td>{"✅ " if closed else "🔄 "}{link}</td>'
+               f'<td>{len(info["rounds"])}</td>')
+        if not closed:
+            pend = sum(r["pending"] for r in info["rounds"])
+            row += f'<td>{f"<b>✏️ {pend}件</b>" if pend else ""}</td>'
+        h.append(row + "</tr>")
     h.append("</table>")
     return "\n".join(h)
 
 def page_dashboard():
     tot, per_ai, per_model, trans = collect_stats()
     sessions = list_sessions()
-    h = ["<h1>Review Dashboard</h1>",
+    h = ["<h1>📊 Review Dashboard</h1>",
          '<div class="smoke"><button onclick="smoke(this)">▶ reviewer スモークテスト</button>'
          '<pre id="smokeout"></pre></div>']
     rate = f'{100 * tot["fp"] / tot["judged"]:.0f}%' if tot["judged"] else "—"
     h.append('<div class="tiles">' + "".join(
         f'<div class="tile"><div class="n">{v}</div><div class="l">{l}</div></div>'
-        for l, v in (("セッション", tot["sessions"]), ("ラウンド", tot["rounds"]),
-                     ("指摘", tot["findings"]), ("裁定済", tot["judged"]), ("誤検知率", rate))) + "</div>")
+        for l, v in (("🗂 セッション", tot["sessions"]), ("🔁 ラウンド", tot["rounds"]),
+                     ("🔍 指摘", tot["findings"]), ("⚖️ 裁定済", tot["judged"]), ("🎯 誤検知率", rate),
+                     ("🪙 トークン", fmt_tok(tot["tok"])), ("💳 Copilot", f'{tot["cr"]:.2f}cr'))) + "</div>")
     h.append(f'<p class="dim">集計対象: {STATS_SINCE[:4]}-{STATS_SINCE[4:6]}-{STATS_SINCE[6:]} 以降のセッション (それ以前は裁定データなし)</p>')
-    h.append("<h2>進行中</h2>")
-    live = [s for s in sessions if not s["closed"]]
-    if live:
-        h.append("<ul>")
-        for s in live:
-            info = parse_session(s["path"])
-            pend = sum(r["pending"] for r in info["rounds"])
-            day = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
-            h.append(f'<li><span class="dim">{day}</span> 🔄 <a href="/log/{s["file"]}"><b>{html.escape(s["repo"])}</b> @ '
-                     f'<code>{html.escape(s["branch"])}</code></a> — {len(info["rounds"])}ラウンド'
-                     + (f', <b>Response未記入 {pend}件</b>' if pend else "") + "</li>")
-        h.append("</ul>")
-    else:
-        h.append('<p class="dim">なし</p>')
-    h.append(stat_table("AI別", per_ai))
-    h.append(stat_table("モデル別", per_model))
-    h.append("<h2>重要度の再評価 (レビュアー評価 → 書き手評価)</h2>")
+    h.append('<div class="cols"><div>')
+    h.append("<h2>🔄 進行中</h2>")
+    h.append(session_table([s for s in sessions if not s["closed"]], closed=False))
+    h.append("<h2>✅ 完了 (push成立)</h2>")
+    h.append(session_table([s for s in sessions if s["closed"]][:15], closed=True))
+    h.append("</div><div>")
+    h.append(stat_table("🤖 AI別", per_ai))
+    h.append(stat_table("🧠 モデル別", per_model))
+    h.append("<h2>⚖️ 重要度の再評価 (レビュアー評価 → 書き手評価)</h2>")
+    h.append('<p class="dim">裁定 (respond.sh) で /h /m /l を付け、レビュアーの重大度を書き直した指摘</p>')
     if trans:
         h.append("<ul>" + "".join(
-            f"<li>{SEV_ICON[a]} {a} → {SEV_ICON[b]} {b} : {n}件 ({ai})</li>"
-            for (a, b, ai), n in sorted(trans.items(), key=lambda kv: -kv[1])) + "</ul>")
+            f'<li>{SEV_ICON[t["from"]]} {t["from"]} → {SEV_ICON[t["to"]]} {t["to"]} ({ai_label(t["ai"])}) — '
+            f'<a href="/log/{"closed/" if t["s"]["closed"] else ""}{t["s"]["file"]}">'
+            f'{html.escape(t["s"]["repo"])} @ <code>{html.escape(t["s"]["branch"])}</code></a>'
+            f' #{t["num"]} <code>{html.escape(t["loc"])}</code></li>'
+            for t in trans) + "</ul>")
     else:
-        h.append('<p class="dim">ズレの記録なし (裁定時に /h /m /l を付けたものだけ出ます)</p>')
-    h.append("<h2>完了 (push成立)</h2><ul>")
-    for s in [s for s in sessions if s["closed"]][:15]:
-        day = datetime.fromtimestamp(s["mtime"]).strftime("%Y-%m-%d %H:%M")
-        h.append(f'<li><span class="dim">{day}</span> <a href="/log/closed/{s["file"]}">{html.escape(s["repo"])} @ '
-                 f'<code>{html.escape(s["branch"])}</code></a></li>')
-    h.append("</ul>")
+        h.append('<p class="dim">なし</p>')
+    h.append("</div></div>")
     return "\n".join(h)
 
 CSS = """
 :root{--bg:#fff;--fg:#1a1a1a;--line:#ddd;--dim:#888;--accent:#0969da;--card:#f6f8fa}
 @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--line:#30363d;--dim:#8b949e;--accent:#58a6ff;--card:#161b22}}
-body{background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,sans-serif;max-width:1100px;margin:0 auto;padding:1em 1.5em}
+body{background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,sans-serif;max-width:1750px;margin:0 auto;padding:1em 1.5em}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:0 2.5em;align-items:start}
+@media(max-width:1200px){.cols{grid-template-columns:1fr}}
+th{white-space:nowrap} .compact td{white-space:nowrap}
+td.best{background:rgba(45,164,78,.15);font-weight:600}
 a{color:var(--accent)} code{background:var(--card);padding:1px 5px;border-radius:4px;font-size:.9em}
 table{border-collapse:collapse;width:100%;margin:.5em 0}
 th,td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}

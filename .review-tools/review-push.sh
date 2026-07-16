@@ -33,6 +33,13 @@ GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$GIT_ROOT" || exit 0
 [ "${REVIEW_SKIP:-}" = "1" ] && exit 0
 
+# Master switch: reviews fire only where someone created .review-tools/.env
+# (see .env.sample) with REVIEW_ENABLED=1. Keeps ports of this tree inert
+# until opted in.
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SELF/.env" ] && . "$SELF/.env"
+[ "${REVIEW_ENABLED:-0}" = "1" ] || exit 0
+
 # Clean temp files on any exit -- including SIGTERM from an outer timeout
 # (e.g. the caller's Bash tool killing a long push). The per-reviewer
 # `timeout` below bounds orphaned reviewers if this script itself is killed.
@@ -40,7 +47,6 @@ OUT=""; HISTCOPY=""
 trap '[ -n "$OUT" ] && rm -rf "$OUT"; [ -n "$HISTCOPY" ] && rm -f "$HISTCOPY"' EXIT
 trap 'exit 143' TERM INT
 
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF/append-log.sh"
 . "$SELF/models.conf"
 REPO=$(basename "$GIT_ROOT")
@@ -216,8 +222,17 @@ $PROMPT"
     grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"; } &
   { reviewer_on copilot "$REVIEWERS_PUSH" && command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_PUSH" --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
       | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"; } &
-  { reviewer_on agy "$REVIEWERS_PUSH" && command -v agy >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_PUSH" 2>"$OUT/agy.err" \
-      | sed '/<message>/,/<\/message>/d' > "$OUT/agy"; } &
+  # agy 1.1.3+ の headless はファイル読み/コマンド実行の許可を soft-deny する
+  # (settings.json の allow ルールは公式書式でも効かなかった) ので、vllm と
+  # 同様に差分を埋め込む (capped)。
+  { if reviewer_on agy "$REVIEWERS_PUSH" && command -v agy >/dev/null 2>&1; then
+      AGY_T0=$(date +%s)
+      { printf '%s\n\n=== 変更差分 (このレビュアーはツール実行不可のため埋め込み) ===\n' "$PROMPT"
+        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 \
+        | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_PUSH" 2>"$OUT/agy.err" \
+        | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
+      python3 "$SELF/agy-usage.py" "$AGY_T0" >> "$OUT/agy.err" 2>/dev/null
+    fi; } &
   # vllm is a bare model, not an agent -- it can't run git itself, so embed
   # the diff (capped) after the shared prompt.
   { if reviewer_on vllm "$REVIEWERS_PUSH"; then

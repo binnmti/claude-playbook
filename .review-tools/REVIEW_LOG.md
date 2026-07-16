@@ -5,7 +5,7 @@
 
 ## 進行中
 
-- 🔄 **monitoring-prototype** @ `fix-config-coverage-20260714` — 4ラウンド, Response未記入 1件, 最新: _(pending)_ — [詳細](log/monitoring-prototype__fix-config-coverage-20260714__20260715T105716041676710.md)
+- 🔄 **monitoring-prototype** @ `fix-config-coverage-20260714` — 11ラウンド, Response未記入 0件, 最新: 指摘なし (自動記入) — [詳細](log/monitoring-prototype__fix-config-coverage-20260714__20260715T105716041676710.md)
 - 🔄 **monitoring-prototype** @ `develop` — 1ラウンド, Response未記入 0件, 最新: 1:fp/l image.png は ToDo.md から参照されるスクリーンショットで意図的なコミット — [詳細](log/monitoring-prototype__develop__20260714T170028540241063.md)
 - 🔄 **oqtopus-cloud** @ `release-1_6_1` — 1ラウンド, Response未記入 1件, 最新: _(pending)_ — [詳細](log/oqtopus-cloud__release-1_6_1__20260703T182412438796983.md)
 
