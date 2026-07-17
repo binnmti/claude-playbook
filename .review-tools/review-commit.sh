@@ -70,9 +70,19 @@ ${STAGED}"
 # (2026-07-15 monitoring-prototype で観測)。
 FILEPROMPT="今回コミットされる staged 差分は次のファイルにあります (hook が書き出したもの): $DIFFCOPY
 これを読んでレビューしてください。必要な変更ファイルの全文は working tree で読めます。差分はこのプロンプトに埋め込んでいません。"
+# agy/vllm はファイルを読めないので履歴はパス参照でなく本文埋め込み。別枠で
+# 20KB に切ってから合流させ (直近セッションほど後ろにあるので tail)、全体
+# キャップは 80KB に広げて diff の取り分 (約60KB) を履歴が食わないようにする。
+PROMPT_EMB="$PROMPT"
 if [ -n "$HISTCOPY" ]; then
+  HISTNOTE="Response 未記入の指摘も含め、すべて既に報告済みです。該当コードが変わっていない限り、同じ指摘を繰り返さないこと。コードが変わった箇所や、記録に無い新しい問題は遠慮なく指摘すること。"
+  PROMPT_EMB="$PROMPT
+
+=== 過去に報告済みのレビュー指摘の記録 (埋め込み) ===
+$HISTNOTE
+$(tail -c 20000 "$HISTCOPY")"
   PROMPT="このリポジトリ+ブランチで過去に報告済みのレビュー指摘の記録が次のファイルにあります: $HISTCOPY
-Response 未記入の指摘も含め、すべて既に報告済みです。該当コードが変わっていない限り、同じ指摘を繰り返さないこと。コードが変わった箇所や、記録に無い新しい問題は遠慮なく指摘すること。
+$HISTNOTE
 
 $PROMPT"
 fi
@@ -82,7 +92,9 @@ OUT=$(mktemp -d)
 # string overruns the kernel's 128KB per-argument limit and silently fails.
 # Each reviewer gets a hard deadline so a commit review always finishes
 # inside the caller's patience; timed-out reviewers show up as ⚠ rows.
-RVTIMEOUT=120
+# 120 では大きめ diff で codex (mini/low) がファイル探索中に締め切り死する
+# (2026-07-17 oqtopus-cloud で観測)
+RVTIMEOUT=240
 # In a worktree git exports GIT_DIR/GIT_INDEX_FILE (absolute) to hooks; codex
 # inherits them and its internal curated-sync then fetch+resets OUR worktree
 # HEAD to refs/codex/curated-sync (observed 2026-07-01/02). Strip them for
@@ -111,8 +123,8 @@ run_agy() {
   # 確実には読めない -- vllm と同様に差分を埋め込む (capped)。FILEPROMPT は
   # 渡さない: ファイルを読めと指示すると deny ループの末に埋め込み差分を無視して
   # レビューを放棄する。
-  { printf '%s\n\nファイル読み取り・コマンド実行はできない環境なので試みないこと。判断はこのプロンプト内の情報だけで行うこと。\n\n=== staged 差分 (埋め込み) ===\n' "$PROMPT"
-    printf '%s\n' "$DIFF"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
+  { printf '%s\n\nファイル読み取り・コマンド実行はできない環境なので試みないこと。判断はこのプロンプト内の情報だけで行うこと。\n\n=== staged 差分 (埋め込み) ===\n' "$PROMPT_EMB"
+    printf '%s\n' "$DIFF"; } | head -c 80000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
     | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_COMMIT" 2>"$OUT/agy.err" \
     | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
   python3 "$SELF/agy-usage.py" "$T0" >> "$OUT/agy.err" 2>/dev/null
@@ -122,8 +134,8 @@ run_vllm() {
   # vllm is a bare model, not an agent -- it can't read files, so embed the
   # diff (capped) after the shared prompt. iconv drops the invalid trailing
   # bytes when the 60KB cut lands mid-UTF-8-char (vLLM rejects those with 400).
-  { printf '%s\n\n=== staged 差分 (このレビュアーはファイル読み取り不可のため埋め込み) ===\n' "$PROMPT"
-    printf '%s\n' "$DIFF"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
+  { printf '%s\n\n=== staged 差分 (このレビュアーはファイル読み取り不可のため埋め込み) ===\n' "$PROMPT_EMB"
+    printf '%s\n' "$DIFF"; } | head -c 80000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
     | vllm_chat "$VLLM_MODEL_COMMIT" > "$OUT/vllm" 2>"$OUT/vllm.err"
 }
 run_codex & run_copilot & run_agy & run_vllm & wait

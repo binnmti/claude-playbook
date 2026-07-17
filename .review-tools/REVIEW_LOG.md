@@ -5,12 +5,15 @@
 
 ## 進行中
 
-- 🔄 **monitoring-prototype** @ `fix-config-coverage-20260714` — 11ラウンド, Response未記入 0件, 最新: 指摘なし (自動記入) — [詳細](log/monitoring-prototype__fix-config-coverage-20260714__20260715T105716041676710.md)
+- 🔄 **oqtopus-cloud** @ `feat-qiqb-dev-gha-deploy` — 6ラウンド, Response未記入 0件, 最新: 指摘なし (自動記入) — [詳細](log/oqtopus-cloud__feat-qiqb-dev-gha-deploy__20260717T142615668594454.md)
+- 🔄 **monitoring-prototype** @ `fix-config-coverage-batch2` — 3ラウンド, Response未記入 0件, 最新: 指摘なし (自動記入) — [詳細](log/monitoring-prototype__fix-config-coverage-batch2__20260717T141151639428102.md)
 - 🔄 **monitoring-prototype** @ `develop` — 1ラウンド, Response未記入 0件, 最新: 1:fp/l image.png は ToDo.md から参照されるスクリーンショットで意図的なコミット — [詳細](log/monitoring-prototype__develop__20260714T170028540241063.md)
 - 🔄 **oqtopus-cloud** @ `release-1_6_1` — 1ラウンド, Response未記入 1件, 最新: _(pending)_ — [詳細](log/oqtopus-cloud__release-1_6_1__20260703T182412438796983.md)
 
 ## 完了 (push成立)
 
+- **monitoring-prototype** @ `fix-config-coverage-20260714` — 手動クローズ: develop にマージ済み (a30b9cc)（2026-07-17） — [詳細](log/closed/monitoring-prototype__fix-config-coverage-20260714__20260715T105716041676710.md)
+- **claude-playbook** @ `master` — `1ee1f26cb7`（2ラウンド） — [詳細](log/closed/claude-playbook__master__20260717T140415680124773.md)
 - **oqtopus-cloud** @ `feat-rds-slow-query-log` — `1d0d4a6981`（4ラウンド） — [詳細](log/closed/oqtopus-cloud__feat-rds-slow-query-log__20260715T143958093664467.md)
 - **monitoring-prototype** @ `develop` — `08bda015a9`（2ラウンド） — [詳細](log/closed/monitoring-prototype__develop__20260714T154523973474263.md)
 - **monitoring-prototype** @ `develop` — `9f9e1f9545`（3ラウンド） — [詳細](log/closed/monitoring-prototype__develop__20260714T151406306048682.md)

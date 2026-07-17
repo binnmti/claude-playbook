@@ -86,7 +86,7 @@ pending_block() {
 review_one() {  # <local-ref> <local-sha> <remote-ref> <remote-sha>
   local LREF="$1" SHA="$2" RREF="$3" RSHA="$4"
   local BR RB BASE BASE_COUNT b count MB PASS LASTREV_FILE LASTREV RANGE_FROM
-  local UNREV COMMON lr R COVERED FILES HISTFILES HISTDIR PROMPT PENDING body r
+  local UNREV COMMON lr R COVERED FILES HISTFILES HISTDIR PROMPT PROMPT_EMB HISTNOTE PENDING body r
 
   case "$LREF" in
     refs/tags/*) return 0 ;;
@@ -210,9 +210,19 @@ checkout 中のブランチとは限らず、working tree の内容は別物の�
 
 $PROMPT"
   fi
+  # agy/vllm はファイルを読めないので履歴はパス参照でなく本文埋め込み。別枠で
+  # 20KB に切ってから合流させ (直近セッションほど後ろにあるので tail)、全体
+  # キャップは 80KB に広げて diff の取り分 (約60KB) を履歴が食わないようにする。
+  PROMPT_EMB="$PROMPT"
   if [ -n "$HISTCOPY" ]; then
+    HISTNOTE="Response 未記入の指摘も含め、すべて既に報告済みです。該当コードが変わっていない限り、同じ指摘を繰り返さないこと。コードが変わった箇所や、記録に無い新しい問題は遠慮なく指摘すること。"
+    PROMPT_EMB="$PROMPT
+
+=== 過去に報告済みのレビュー指摘の記録 (埋め込み) ===
+$HISTNOTE
+$(tail -c 20000 "$HISTCOPY")"
     PROMPT="このリポジトリ+ブランチで過去に報告済みのレビュー指摘の記録が次のファイルにあります: $HISTCOPY
-Response 未記入の指摘も含め、すべて既に報告済みです。該当コードが変わっていない限り、同じ指摘を繰り返さないこと。コードが変わった箇所や、記録に無い新しい問題は遠慮なく指摘すること。
+$HISTNOTE
 
 $PROMPT"
   fi
@@ -230,8 +240,8 @@ $PROMPT"
   # deny ループの末に埋め込み差分を無視してレビューを放棄する。
   { if reviewer_on agy "$REVIEWERS_PUSH" && command -v agy >/dev/null 2>&1; then
       AGY_T0=$(date +%s)
-      { printf '%s\n\nファイル読み取り・コマンド実行はできない環境なので試みないこと。判断はこのプロンプト内の情報だけで行うこと。\n\n=== 変更差分 (埋め込み) ===\n' "$PROMPT"
-        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
+      { printf '%s\n\nファイル読み取り・コマンド実行はできない環境なので試みないこと。判断はこのプロンプト内の情報だけで行うこと。\n\n=== 変更差分 (埋め込み) ===\n' "$PROMPT_EMB"
+        git diff "$RANGE_FROM...$SHA"; } | head -c 80000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
         | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_PUSH" 2>"$OUT/agy.err" \
         | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
       python3 "$SELF/agy-usage.py" "$AGY_T0" >> "$OUT/agy.err" 2>/dev/null
@@ -240,8 +250,8 @@ $PROMPT"
   # the diff (capped) after the shared prompt. iconv drops the invalid trailing
   # bytes when the 60KB cut lands mid-UTF-8-char (vLLM rejects those with 400).
   { if reviewer_on vllm "$REVIEWERS_PUSH"; then
-      { printf '%s\n\n=== 変更差分 (このレビュアーはコマンド実行不可のため埋め込み) ===\n' "$PROMPT"
-        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
+      { printf '%s\n\n=== 変更差分 (このレビュアーはコマンド実行不可のため埋め込み) ===\n' "$PROMPT_EMB"
+        git diff "$RANGE_FROM...$SHA"; } | head -c 80000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
         | vllm_chat "$VLLM_MODEL_PUSH" > "$OUT/vllm" 2>"$OUT/vllm.err"
     fi; } &
   wait

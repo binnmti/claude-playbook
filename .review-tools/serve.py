@@ -139,13 +139,20 @@ def sev_of(icon):
             return k
     return None
 
+SEV_WEIGHT = {"high": 5, "med": 2, "low": 1}
+SEV_JP = {"high": "高", "med": "中", "low": "低"}
+
+def fix_score(s):
+    return sum(SEV_WEIGHT[w] * s["fix_" + w] for w in SEV_WEIGHT)
+
 def collect_stats():
-    per_ai, per_model, trans = {}, {}, []
+    per_ai, per_model = {}, {}
     tot = {"sessions": 0, "rounds": 0, "findings": 0, "judged": 0, "fp": 0,
            "tok": 0, "cr": 0.0}
     def slot(d, k):
         return d.setdefault(k, {"findings": 0, "fix": 0, "fp": 0, "skip": 0,
                                 "dup": 0, "rounds": 0, "warn": 0, "unparsed": 0,
+                                "fix_high": 0, "fix_med": 0, "fix_low": 0,
                                 "tok": 0, "cr": 0.0})
     for s in list_sessions():
         # pre-numbering sessions can never be judged (free-text Responses,
@@ -188,13 +195,13 @@ def collect_stats():
                     tot["fp"] += vd["v"] == "fp"
                     for d, k in ((per_ai, ai), (per_model, model)):
                         slot(d, k)[vd["v"]] += 1
-                    rs = sev_of(row["sev"])
-                    if vd["sev"] and rs:
-                        ws = SEV_WORD[vd["sev"]]
-                        if ws != rs:
-                            trans.append({"from": rs, "to": ws, "ai": ai, "s": s,
-                                          "num": row["num"], "loc": row["loc"]})
-    return tot, per_ai, per_model, trans
+                    if vd["v"] == "fix":
+                        # 最終重大度 = /h /m /l 上書き、なければレビュアー評価に同意
+                        fs = SEV_WORD[vd["sev"]] if vd["sev"] else sev_of(row["sev"])
+                        if fs:
+                            for d, k in ((per_ai, ai), (per_model, model)):
+                                slot(d, k)["fix_" + fs] += 1
+    return tot, per_ai, per_model
 
 # ---------- rendering ----------
 
@@ -258,6 +265,7 @@ def page_session(name, closed):
 
 def stat_table(title, d):
     h = [f'<h2>{title}</h2><table class="compact"><tr><th></th><th>rounds</th><th>指摘</th><th>採用</th>'
+         "<th>高</th><th>中</th><th>低</th>"
          "<th>誤検知</th><th>対応せず</th><th>既報</th><th>誤検知率</th><th>🪙 トークン</th><th>💳 費用</th><th>⚠</th><th>❓</th></tr>"]
     rows = []
     for k in sorted(d, key=lambda k: -d[k]["findings"]):
@@ -265,17 +273,19 @@ def stat_table(title, d):
         judged = s["fix"] + s["fp"] + s["skip"] + s["dup"]
         rows.append((k, s, 100 * s["fp"] / judged if judged else None))
     # best-in-column highlight, only meaningful with something to compare
-    best_fix = max((s["fix"] for _, s, _ in rows), default=0) if len(rows) > 1 else 0
+    # 採用は加重スコア (🔴5 🟡2 🟢1) で比較 -- 少数でも重要な指摘が勝てる
+    best_fix = max((fix_score(s) for _, s, _ in rows), default=0) if len(rows) > 1 else 0
     rates = [r for _, _, r in rows if r is not None]
     best_rate = min(rates) if len(rows) > 1 and rates else None
     for k, s, rate in rows:
-        fixc = ' class="best"' if best_fix and s["fix"] == best_fix else ""
+        fixc = ' class="best"' if best_fix and fix_score(s) == best_fix else ""
         ratec = ' class="best"' if rate is not None and rate == best_rate else ""
         ratestr = f'{rate:.0f}%' if rate is not None else '<span class="dim">—</span>'
         tokstr = fmt_tok(s["tok"]) if s["tok"] else '<span class="dim">—</span>'
         crstr = f'{s["cr"]:.2f}cr' if s["cr"] else '<span class="dim">—</span>'
+        sevcells = "".join(f'<td>{s["fix_" + w] or "<span class=dim>—</span>"}</td>' for w in SEV_WEIGHT)
         h.append(f"<tr><td>{AI_ICON.get(k.split(' · ')[0], '🤖')} {html.escape(k)}</td><td>{s['rounds']}</td><td>{s['findings']}</td>"
-                 f"<td{fixc}>{s['fix']}</td><td>{s['fp']}</td><td>{s['skip']}</td><td>{s['dup']}</td>"
+                 f"<td{fixc}>{s['fix']}</td>{sevcells}<td>{s['fp']}</td><td>{s['skip']}</td><td>{s['dup']}</td>"
                  f"<td{ratec}>{ratestr}</td><td>{tokstr}</td><td>{crstr}</td><td>{s['warn']}</td><td>{s['unparsed']}</td></tr>")
     h.append("</table>")
     return "\n".join(h)
@@ -300,7 +310,7 @@ def session_table(items, closed):
     return "\n".join(h)
 
 def page_dashboard():
-    tot, per_ai, per_model, trans = collect_stats()
+    tot, per_ai, per_model = collect_stats()
     sessions = list_sessions()
     h = ["<h1>📊 Review Dashboard</h1>",
          '<div class="smoke"><button onclick="smoke(this)">▶ reviewer スモークテスト</button>'
@@ -320,17 +330,8 @@ def page_dashboard():
     h.append("</div><div>")
     h.append(stat_table("🤖 AI別", per_ai))
     h.append(stat_table("🧠 モデル別", per_model))
-    h.append("<h2>⚖️ 重要度の再評価 (レビュアー評価 → 書き手評価)</h2>")
-    h.append('<p class="dim">裁定 (respond.sh) で /h /m /l を付け、レビュアーの重大度を書き直した指摘</p>')
-    if trans:
-        h.append("<ul>" + "".join(
-            f'<li>{SEV_ICON[t["from"]]} {t["from"]} → {SEV_ICON[t["to"]]} {t["to"]} ({ai_label(t["ai"])}) — '
-            f'<a href="/log/{"closed/" if t["s"]["closed"] else ""}{t["s"]["file"]}">'
-            f'{html.escape(t["s"]["repo"])} @ <code>{html.escape(t["s"]["branch"])}</code></a>'
-            f' #{t["num"]} <code>{html.escape(t["loc"])}</code></li>'
-            for t in trans) + "</ul>")
-    else:
-        h.append('<p class="dim">なし</p>')
+    h.append('<p class="dim">高/中/低 = 採用指摘の書き手評価 (裁定の /h /m /l、なければレビュアー評価に同意)。'
+             '採用のハイライトは加重スコア 高5 中2 低1</p>')
     h.append("</div></div>")
     return "\n".join(h)
 

@@ -170,9 +170,11 @@ append_review_log() {
       printf '1\t%s\t8\t⚠\t—\t%s\t(出力なし%s)\n' "$r" "$r" "${errtail:+ — stderr: $errtail}" >> "$ROWS"
       continue
     fi
+    # agy (GPT-OSS) はプロンプトの「重大度:」を英語に翻訳して (severity: **med**)
+    # と書いてくることがある (2026-07-17 観測) -- 両表記と太字を受ける
     local hits
     hits=$(printf '%s\n' "$body" | sed -E -n \
-      's/^-[[:space:]]*\[([^]]+)\][[:space:]]*(.*)\(重大度:[[:space:]]*(high|med|low)[^)]*\)[[:space:]]*$/\1\t\2\t\3/Ip')
+      's/^-[[:space:]]*\[([^]]+)\][[:space:]]*(.*)\((重大度|severity):[[:space:]]*[*]*(high|med|low)[^)]*\)[[:space:]]*$/\1\t\2\t\4/Ip')
     if [ -n "$hits" ]; then
       while IFS=$'\t' read -r loc finding sev; do
         [ -z "$loc" ] && continue
