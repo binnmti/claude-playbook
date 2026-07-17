@@ -55,7 +55,7 @@ REPO=$(basename "$GIT_ROOT")
 # caller's patience (a stray reviewer otherwise runs on as an orphan burning
 # tokens when the push gets killed from outside). Timed-out reviewers show
 # up as ⚠ rows in the log.
-RVTIMEOUT=300
+RVTIMEOUT=600
 # In a worktree git exports GIT_DIR/GIT_INDEX_FILE (absolute) to hooks; codex
 # inherits them and its internal curated-sync then fetch+resets OUR worktree
 # HEAD to refs/codex/curated-sync (observed 2026-07-01/02). Strip them for
@@ -197,12 +197,14 @@ review_one() {  # <local-ref> <local-sha> <remote-ref> <remote-sha>
   fi
 
   PROMPT="$(cat "$SELF/prompt-push.md")
-このリポジトリ内で変更を自分で確認してください(read-only): \`git diff ${RANGE_FROM}...${SHA}\` を実行し、
-必要な変更ファイルの全文は \`git show ${SHA}:<パス>\` で読んでください (push 対象が
-checkout 中のブランチとは限らず、working tree の内容は別物のことがあります)。差分は埋め込んでいません。
 
 変更ファイル:
 ${FILES}"
+  # codex/copilot だけに渡す git 実行指示。agy/vllm はツールを使えないので
+  # この指示を渡すと矛盾し、agy は埋め込み差分を無視してレビューを放棄する。
+  FILEPROMPT="このリポジトリ内で変更を自分で確認してください(read-only): \`git diff ${RANGE_FROM}...${SHA}\` を実行し、
+必要な変更ファイルの全文は \`git show ${SHA}:<パス>\` で読んでください (push 対象が
+checkout 中のブランチとは限らず、working tree の内容は別物のことがあります)。差分は埋め込んでいません。"
   if [ "$RANGE_FROM" != "$MB" ]; then
     PROMPT="このブランチは ${RANGE_FROM} まで前回レビュー済みです。今回はそこからの増分のみをレビューしてください。
 
@@ -217,27 +219,29 @@ $PROMPT"
 
   [ -n "$OUT" ] && rm -rf "$OUT"
   OUT=$(mktemp -d)
-  { reviewer_on codex "$REVIEWERS_PUSH" && command -v codex >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
+  { reviewer_on codex "$REVIEWERS_PUSH" && command -v codex >/dev/null 2>&1 && printf '%s\n\n%s' "$PROMPT" "$FILEPROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
       -m "$CODEX_MODEL_PUSH" -c model_reasoning_effort="$CODEX_EFFORT_PUSH" > "$OUT/codex" 2>"$OUT/codex.err"
     grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"; } &
-  { reviewer_on copilot "$REVIEWERS_PUSH" && command -v copilot >/dev/null 2>&1 && printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_PUSH" --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
+  { reviewer_on copilot "$REVIEWERS_PUSH" && command -v copilot >/dev/null 2>&1 && printf '%s\n\n%s' "$PROMPT" "$FILEPROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_PUSH" --allow-all-tools --log-level none 2>"$OUT/copilot.err" \
       | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"; } &
   # agy 1.1.3+ の headless はファイル読み/コマンド実行の許可を soft-deny する
   # (settings.json の allow ルールは公式書式でも効かなかった) ので、vllm と
-  # 同様に差分を埋め込む (capped)。
+  # 同様に差分を埋め込む (capped)。FILEPROMPT は渡さない: git を叩けと指示すると
+  # deny ループの末に埋め込み差分を無視してレビューを放棄する。
   { if reviewer_on agy "$REVIEWERS_PUSH" && command -v agy >/dev/null 2>&1; then
       AGY_T0=$(date +%s)
-      { printf '%s\n\n=== 変更差分 (このレビュアーはツール実行不可のため埋め込み) ===\n' "$PROMPT"
-        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 \
+      { printf '%s\n\nファイル読み取り・コマンド実行はできない環境なので試みないこと。判断はこのプロンプト内の情報だけで行うこと。\n\n=== 変更差分 (埋め込み) ===\n' "$PROMPT"
+        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
         | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_PUSH" 2>"$OUT/agy.err" \
         | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
       python3 "$SELF/agy-usage.py" "$AGY_T0" >> "$OUT/agy.err" 2>/dev/null
     fi; } &
   # vllm is a bare model, not an agent -- it can't run git itself, so embed
-  # the diff (capped) after the shared prompt.
+  # the diff (capped) after the shared prompt. iconv drops the invalid trailing
+  # bytes when the 60KB cut lands mid-UTF-8-char (vLLM rejects those with 400).
   { if reviewer_on vllm "$REVIEWERS_PUSH"; then
       { printf '%s\n\n=== 変更差分 (このレビュアーはコマンド実行不可のため埋め込み) ===\n' "$PROMPT"
-        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 \
+        git diff "$RANGE_FROM...$SHA"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
         | vllm_chat "$VLLM_MODEL_PUSH" > "$OUT/vllm" 2>"$OUT/vllm.err"
     fi; } &
   wait

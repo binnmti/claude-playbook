@@ -63,11 +63,13 @@ printf '%s\n' "$DIFF" > "$DIFFCOPY"
 
 PROMPT="$(cat "$SELF/prompt-commit.md")
 
-今回コミットされる staged 差分は次のファイルにあります (hook が書き出したもの): $DIFFCOPY
-これを読んでレビューしてください。必要な変更ファイルの全文は working tree で読めます。差分はこのプロンプトに埋め込んでいません。
-
 変更ファイル:
 ${STAGED}"
+# codex/copilot だけに渡すファイル読み指示。agy/vllm はファイルを読めないので
+# この指示を渡すと矛盾し、agy は「パスを教えて」とレビューを放棄する
+# (2026-07-15 monitoring-prototype で観測)。
+FILEPROMPT="今回コミットされる staged 差分は次のファイルにあります (hook が書き出したもの): $DIFFCOPY
+これを読んでレビューしてください。必要な変更ファイルの全文は working tree で読めます。差分はこのプロンプトに埋め込んでいません。"
 if [ -n "$HISTCOPY" ]; then
   PROMPT="このリポジトリ+ブランチで過去に報告済みのレビュー指摘の記録が次のファイルにあります: $HISTCOPY
 Response 未記入の指摘も含め、すべて既に報告済みです。該当コードが変わっていない限り、同じ指摘を繰り返さないこと。コードが変わった箇所や、記録に無い新しい問題は遠慮なく指摘すること。
@@ -89,7 +91,7 @@ GITENV=(env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_COMMON_DIR)
 run_codex() {
   reviewer_on codex "$REVIEWERS_COMMIT" || return
   command -v codex >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
+  printf '%s\n\n%s' "$PROMPT" "$FILEPROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" codex exec --sandbox read-only --skip-git-repo-check \
     -m "$CODEX_MODEL_COMMIT" -c model_reasoning_effort="$CODEX_EFFORT_COMMIT" \
     > "$OUT/codex" 2>"$OUT/codex.err"
   grep -qiE 'not supported|invalid_request|^ERROR' "$OUT/codex" && : > "$OUT/codex"
@@ -97,7 +99,7 @@ run_codex() {
 run_copilot() {
   reviewer_on copilot "$REVIEWERS_COMMIT" || return
   command -v copilot >/dev/null 2>&1 || return
-  printf '%s' "$PROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_COMMIT" --log-level none 2>"$OUT/copilot.err" \
+  printf '%s\n\n%s' "$PROMPT" "$FILEPROMPT" | "${GITENV[@]}" timeout "$RVTIMEOUT" copilot --model "$COPILOT_MODEL_COMMIT" --log-level none 2>"$OUT/copilot.err" \
     | sed -e '/^Changes /,$d' -e '/^[[:space:]]*[●│└]/d' > "$OUT/copilot"
 }
 run_agy() {
@@ -106,9 +108,11 @@ run_agy() {
   local T0; T0=$(date +%s)
   # headless agy はファイル読み取り/コマンド実行の許可を非決定的に auto-deny する
   # (settings.json の allow ルールは起動時に剥がされ効かない) ので、DIFFCOPY を
-  # 確実には読めない -- vllm と同様に差分を埋め込む (capped)。
-  { printf '%s\n\n=== staged 差分 (このレビュアーはファイル読み取り不可のため埋め込み) ===\n' "$PROMPT"
-    printf '%s\n' "$DIFF"; } | head -c 60000 \
+  # 確実には読めない -- vllm と同様に差分を埋め込む (capped)。FILEPROMPT は
+  # 渡さない: ファイルを読めと指示すると deny ループの末に埋め込み差分を無視して
+  # レビューを放棄する。
+  { printf '%s\n\nファイル読み取り・コマンド実行はできない環境なので試みないこと。判断はこのプロンプト内の情報だけで行うこと。\n\n=== staged 差分 (埋め込み) ===\n' "$PROMPT"
+    printf '%s\n' "$DIFF"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
     | "${GITENV[@]}" timeout "$RVTIMEOUT" agy --sandbox --model "$AGY_MODEL_COMMIT" 2>"$OUT/agy.err" \
     | sed '/<message>/,/<\/message>/d' > "$OUT/agy"
   python3 "$SELF/agy-usage.py" "$T0" >> "$OUT/agy.err" 2>/dev/null
@@ -116,9 +120,10 @@ run_agy() {
 run_vllm() {
   reviewer_on vllm "$REVIEWERS_COMMIT" || return
   # vllm is a bare model, not an agent -- it can't read files, so embed the
-  # diff (capped) after the shared prompt.
+  # diff (capped) after the shared prompt. iconv drops the invalid trailing
+  # bytes when the 60KB cut lands mid-UTF-8-char (vLLM rejects those with 400).
   { printf '%s\n\n=== staged 差分 (このレビュアーはファイル読み取り不可のため埋め込み) ===\n' "$PROMPT"
-    printf '%s\n' "$DIFF"; } | head -c 60000 \
+    printf '%s\n' "$DIFF"; } | head -c 60000 | iconv -f utf-8 -t utf-8 -c 2>/dev/null \
     | vllm_chat "$VLLM_MODEL_COMMIT" > "$OUT/vllm" 2>"$OUT/vllm.err"
 }
 run_codex & run_copilot & run_agy & run_vllm & wait
