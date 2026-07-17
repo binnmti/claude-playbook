@@ -1,6 +1,11 @@
 # Credentials and secrets
 .credentials.json
 
+# review-tools runtime data
+.review-tools/.env
+.review-tools/log/
+__pycache__/
+
 # Local settings (may contain user-specific configs)
 settings.local.json
 
