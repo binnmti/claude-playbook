@@ -140,7 +140,6 @@ def sev_of(icon):
     return None
 
 SEV_WEIGHT = {"high": 5, "med": 2, "low": 1}
-SEV_JP = {"high": "高", "med": "中", "low": "低"}
 
 def fix_score(s):
     return sum(SEV_WEIGHT[w] * s["fix_" + w] for w in SEV_WEIGHT)
