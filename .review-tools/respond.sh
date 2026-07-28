@@ -65,7 +65,10 @@ LOCK=$(_global_lock)
         exit 1
       fi
     done
-    [ -n "$missing" ] && echo "⚠ 裁定なしの指摘: $missing (ダッシュボードでは未裁定扱い)" >&2
+    if [ -n "$TOKENS" ] && [ -n "$missing" ]; then
+      echo "裁定なしの指摘があります: $missing — 全件に verdict を付けてください (自由文のみで済ませる場合は N: トークンを一切使わないこと)" >&2
+      exit 1
+    fi
     [ -z "$TOKENS" ] && echo "⚠ 裁定トークンなしの自由文 (ダッシュボードには乗りません)" >&2
   fi
 
